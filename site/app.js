@@ -329,7 +329,7 @@
     } else if (!data) {
       box.append(el('p', 'empty', failures ? 'The feed could not be loaded, so nothing is shown. Connection: ' + conn + '.' : 'loading...'));
     } else if (!shown.length) {
-      box.append(el('p', 'empty', all.length ? 'No rows match the current filters.' : 'Nothing here yet.'));
+      box.append(el('p', 'empty', T.emptyMessage(state.view, all.length, recs.repos.length)));
     } else if (state.view === 'feed') {
       const ul = el('ul', 'feed');
       const head = el('li', 'colhead');

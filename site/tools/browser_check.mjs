@@ -4,6 +4,8 @@
 //   real      - served over http://127.0.0.1 as deployed (data/ is the real export, testdata/ left out)
 //   real-file - the real copy opened over file://, where fetch is unavailable and the fallback is null:
 //               the page must show that the feed could not be loaded, not throw and not show any data
+//   no-events - the real copy with its events emptied, as after a first collection: the feed view says
+//               there are no events yet and the table view still lists the repositories
 // Usage: node tools/browser_check.mjs <chromium-binary> [--no-sandbox]
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -27,6 +29,13 @@ cpSync(root, sampleDir, { recursive: true, filter: skip });
 rmSync(join(sampleDir, 'data'), { recursive: true, force: true });
 cpSync(join(root, 'testdata'), join(sampleDir, 'data'), { recursive: true });
 cpSync(root, realDir, { recursive: true, filter: skip });
+const noEventsDir = join(work, 'no-events');
+cpSync(realDir, noEventsDir, { recursive: true });
+{
+  const f = JSON.parse(readFileSync(join(noEventsDir, 'data', 'feed.json'), 'utf8'));
+  f.events = [];
+  writeFileSync(join(noEventsDir, 'data', 'feed.json'), JSON.stringify(f));
+}
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.woff': 'font/woff', '.txt': 'text/plain; charset=utf-8' };
 function serve(dir) {
@@ -43,6 +52,7 @@ function serve(dir) {
 }
 const sampleSrv = await serve(sampleDir);
 const realSrv = await serve(realDir);
+const noEventsSrv = await serve(noEventsDir);
 const chrome = spawn(bin, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank', ...flags], { stdio: 'ignore' });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -301,7 +311,29 @@ for (const [kind, page, search] of runs) {
   report[name] = r;
 }
 
-const origins = [[sampleSrv.origin, '<sample>'], [realSrv.origin, '<real>'], [pathToFileURL(realDir).href, '<real-file>']];
+// real copy with no events: the feed view explains why it is empty, the table lists the repositories
+{
+  const name = 'no-events-desktop-1280x800';
+  await cmd('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await cmd('Page.navigate', { url: noEventsSrv.origin + '/index.html' });
+  await sleep(1500);
+  const noEvents = 'No events yet. The next collection compares against this baseline. The table and forks views list the repositories already found.';
+  const repoCount = JSON.parse(readFileSync(join(noEventsDir, 'data', 'feed.json'), 'utf8')).repos.length;
+  const r = {
+    repos: repoCount,
+    feedRows: (await rows()).length,
+    feedView: await evalJs("document.getElementById('view').textContent"),
+  };
+  await typeLine('view table');
+  r.tableRows = await evalJs("document.querySelectorAll('#view tbody tr').length");
+  r.tableEmpty = await evalJs("(document.querySelector('#view .empty') || {}).textContent || null");
+  check(repoCount > 0 && r.feedRows === 0 && r.feedView === noEvents, name + ': feed view does not say there are no events yet: ' + JSON.stringify(r.feedView));
+  check(r.tableRows > 0 && r.tableEmpty === null, name + ': table view does not list the repositories');
+  writeFileSync(join(shots, name + '.png'), Buffer.from((await cmd('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+  report[name] = r;
+}
+
+const origins = [[sampleSrv.origin, '<sample>'], [realSrv.origin, '<real>'], [noEventsSrv.origin, '<no-events>'], [pathToFileURL(realDir).href, '<real-file>']];
 console.log('requests:', JSON.stringify([...new Set(requests)].map((u) => origins.reduce((s, [o, n]) => s.replace(o, n), u))));
 check(requests.every((u) => origins.some(([o]) => u.startsWith(o)) || u === 'about:blank'), 'a request left the local copies');
 console.log('problems (console errors/warnings, CSP violations, failed requests):', problems.length ? '\n  ' + problems.join('\n  ') : 'none');
@@ -313,5 +345,6 @@ await sleep(300);
 rmSync(profile, { recursive: true, force: true });
 sampleSrv.srv.close();
 realSrv.srv.close();
+noEventsSrv.srv.close();
 rmSync(work, { recursive: true, force: true });
 process.exit(problems.length || fails.length ? 1 : 0);

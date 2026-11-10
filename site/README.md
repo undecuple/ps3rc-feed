@@ -14,7 +14,9 @@ Tests (Node 20 or newer, no dependencies), run inside this folder:
 
     node --test
 
-Browser check (headless Chromium, local only): `sh tools/browser_check.sh`. It serves two temporary copies of this folder on 127.0.0.1, one with `testdata/` copied into `data/` (sample) and one as is (real feed), and also opens the real copy over file:// to check the failed-load state. Screenshots go to `shots/` (ignored by git).
+Browser check (headless Chromium, local only): `sh tools/browser_check.sh`. It serves two temporary copies of this folder on 127.0.0.1, one with `testdata/` copied into `data/` (sample) and one as is (real feed), and also opens the real copy over file:// to check the failed-load state. A third served copy has the real feed with its events emptied: the feed view must say there are no events yet and the table view must list the repositories. Screenshots go to `shots/` (ignored by git).
+
+When a view has no rows, `emptyMessage` in `terminal.js` picks the text: a feed with repositories but no events (as after a first collection) says so and points to the table and forks views; otherwise it is `Nothing here yet.`, or `No rows match the current filters.` when filters hide every row.
 
 Type `help` at the prompt for the commands.
 
