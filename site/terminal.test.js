@@ -366,3 +366,23 @@ test('invalid times show as unknown instead of throwing', () => {
   assert.equal(T.eventTime(NaN, NOW), '[unknown]');
   assert.equal(T.eventTime(NOW, NaN), '[unknown]');
 });
+
+test('an event without a source time shows its collection time, not the viewer clock', () => {
+  const f = {
+    generated_at: '2026-11-10T04:15:58Z',
+    repos: [{ id: 'r1', repo: 'a/b', owner: 'a', url: 'https://github.com/a/b' }],
+    events: [
+      { id: 'x1', type: 'repository_discovered', repo_id: 'r1', source_at: null, observed_at: '2026-11-10T04:15:58Z', summary: 's' },
+      { id: 'x2', type: 'commit', repo_id: 'r1', source_at: '2026-11-10T03:00:00Z', observed_at: '2026-11-10T04:15:58Z', summary: 's' },
+    ],
+  };
+  const j = T.joinData(f, Date.parse(f.generated_at));
+  const [a, b] = j.events;
+  assert.equal(a.time, Date.parse('2026-11-10T04:15:58Z'));
+  assert.equal(a.sourceTime, null);
+  assert.equal(b.time, Date.parse('2026-11-10T03:00:00Z'));
+  assert.equal(b.sourceTime, Date.parse('2026-11-10T03:00:00Z'));
+  const shown = T.execute(T.initialState(), 'show x1', { now: Date.parse(f.generated_at), find: (id) => j.events.find((r) => r.id === id) || null, values: {}, info: [] });
+  assert.ok(shown.out.some((l) => /source time: unknown/.test(l.text)));
+  assert.ok(shown.out.some((l) => /collected:\s+2026-11-10 04:15 UTC/.test(l.text)));
+});

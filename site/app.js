@@ -351,7 +351,7 @@
   function renderChrome(total, count) {
     const c = ctx();
     $('statusline').textContent = data
-      ? 'collected ' + T.hhmm(Date.parse(data.generated_at)) + ' UTC (' + T.ago(Date.parse(data.generated_at), c.now) + ') | feed stale: ' + (c.stale ? 'yes' : 'no') + ' | connection: ' + conn + ' | times shown are source times, UTC'
+      ? 'collected ' + T.hhmm(Date.parse(data.generated_at)) + ' UTC (' + T.ago(Date.parse(data.generated_at), c.now) + ') | feed stale: ' + (c.stale ? 'yes' : 'no') + ' | connection: ' + conn + ' | times shown are source times, or collection times when the source gives none, UTC'
       : 'connection: ' + conn;
 
     const views = $('views');
