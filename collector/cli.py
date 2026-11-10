@@ -39,12 +39,18 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 from . import catalog, collect, events, github, schema, store
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE_ROOT = os.path.join(REPO_ROOT, "tests", "fixtures")
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_REFUSED = 2
+EXIT_PARTIAL = 3
 DATA_ROOT = os.path.join(REPO_ROOT, "data")
 
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -184,14 +190,88 @@ def _refuse(message):
     return 2
 
 
+def resolve_out_path(value):
+    """The run file path for --live: a .json file under <repo>/data/, with no symbolic link on the way.
+
+    A relative path resolves against the repository root. Every existing
+    component from the repository root down to the file is lstat'ed; a
+    symbolic link anywhere (data/ itself, a subdirectory, the file) is
+    refused. Returns the absolute path; components that do not exist yet
+    are created later by write_run_file.
+    """
+    if not isinstance(value, str) or not value:
+        raise RefusedInput("refused: --live requires --out under the data/ directory")
+    candidate = value if os.path.isabs(value) else os.path.join(REPO_ROOT, value)
+    normalised = os.path.normpath(candidate)
+    data_root = os.path.normpath(DATA_ROOT)
+    if not normalised.startswith(data_root + os.sep):
+        raise RefusedInput("refused: --out must lie under the data/ directory of the repository (%s)" % os.path.relpath(DATA_ROOT, REPO_ROOT))
+    if not normalised.endswith(".json") or os.path.basename(normalised) == ".json":
+        raise RefusedInput("refused: --out must be a .json file")
+    walk = os.path.normpath(REPO_ROOT)
+    for part in os.path.relpath(normalised, walk).split(os.sep):
+        walk = os.path.join(walk, part)
+        try:
+            st = os.lstat(walk)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            raise RefusedInput("refused: --out path contains a symbolic link")
+        if walk != normalised and not stat.S_ISDIR(st.st_mode):
+            raise RefusedInput("refused: --out path component is not a directory")
+        if walk == normalised and not stat.S_ISREG(st.st_mode):
+            raise RefusedInput("refused: --out exists and is not a regular file")
+    return normalised
+
+
+def write_run_file(run, out_path):
+    """Write the run atomically: exclusive temp file in the target directory, fsync, replace, mode 0644."""
+    directory = os.path.dirname(out_path)
+    os.makedirs(directory, exist_ok=True)
+    if os.path.islink(directory) or os.path.islink(out_path):
+        raise RefusedInput("refused: --out path contains a symbolic link")
+    data = (json.dumps(run, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(out_path) + ".", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)
+        if os.path.islink(out_path):
+            raise RefusedInput("refused: --out path contains a symbolic link")
+        os.replace(tmp, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dir_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _check_max_requests(value):
+    if value is None:
+        raise RefusedInput("refused: --live requires an explicit --max-requests")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > collect.MAX_REQUESTS_LIMIT:
+        raise RefusedInput("refused: --max-requests must be between 1 and %d" % collect.MAX_REQUESTS_LIMIT)
+    return value
+
+
 def run_collect(args):
     config = collect.load_config(args.config)
     run_at = args.run_at or _now_utc()
     schema.TIMESTAMP.check(run_at, "--run-at")
+    if args.max_requests is not None:
+        _check_max_requests(args.max_requests)
 
     if not args.live:
         if args.out:
-            return _refuse("--out requires --live; without --live nothing is written")
+            raise RefusedInput("refused: --out requires --live; without --live nothing is written")
         if args.recorded:
             recorded_path = resolve_fixture_path(args.recorded)
             if not stat.S_ISREG(os.lstat(recorded_path).st_mode):
@@ -202,48 +282,45 @@ def run_collect(args):
             _print({"plan": client.log})
         else:
             _print({"plan": collect.plan_requests(config)})
-        return 0
+        return EXIT_OK
 
     sys.stderr.write("LIVE: read-only GET requests to https://api.github.com will be made.\n")
-    if args.max_requests is None:
-        return _refuse("--live requires an explicit --max-requests")
-    if args.max_requests < 1:
-        return _refuse("--max-requests must be at least 1")
-    token_text = os.environ.get("GITHUB_TOKEN") or None
-    if token_text is None and not args.anonymous:
-        return _refuse("GITHUB_TOKEN is not set; export it or pass --anonymous for unauthenticated public access")
-    if not args.out:
-        return _refuse("--live requires --out under the data/ directory")
-    out_path = os.path.realpath(args.out)
-    data_root = os.path.realpath(DATA_ROOT)
-    if not out_path.startswith(data_root + os.sep) or not out_path.endswith(".json"):
-        return _refuse("--out must be a .json file under the data/ directory (%s)" % os.path.relpath(DATA_ROOT, REPO_ROOT))
+    max_requests = _check_max_requests(args.max_requests)
+    if args.anonymous:
+        # The environment is not consulted at all: no Authorization header will be sent.
+        token_text = None
+    else:
+        token_text = os.environ.get("GITHUB_TOKEN") or None
+        if token_text is None:
+            raise RefusedInput("refused: GITHUB_TOKEN is not set; export it or pass --anonymous for unauthenticated public access")
+    out_path = resolve_out_path(args.out)
     placeholders = collect.config_uses_example_names(config)
     if placeholders:
-        return _refuse("config uses placeholder names from config/sources.example.json: %s" % ", ".join(sorted(placeholders)))
+        raise RefusedInput("refused: config uses %d placeholder name(s) from config/sources.example.json" % len(placeholders))
+    try:
+        token = github.Secret(token_text) if token_text is not None else None
+    except ValueError as exc:
+        raise RefusedInput("refused: GITHUB_TOKEN %s" % exc) from None
 
-    token = github.Secret(token_text) if token_text is not None else None
     transport = github.LiveTransport()
-    client = github.Client(transport, token=token, max_requests=args.max_requests, page_caps=config["page_caps"])
+    client = github.Client(transport, token=token, max_requests=max_requests, page_caps=config["page_caps"])
     run, report = collect.collect(client, config, run_at)
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    tmp = out_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(run, fh, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False)
-        fh.write("\n")
-    os.replace(tmp, out_path)
+    write_run_file(run, out_path)
     _print(
         {
             "written": os.path.relpath(out_path, REPO_ROOT),
             "run_at": run_at,
             "repositories": len(run["repositories"]),
+            "complete": report["complete"],
             "stopped": report["stopped"],
-            "not_fetched_repository_ids": report["not_fetched_repository_ids"],
+            "not_fetched_repository_ids": report["not_fetched_repository_ids"][:100],
+            "error_count": report["error_count"],
             "errors": report["errors"],
+            "dropped_items": report["dropped_items"],
             "client": report["client"],
         }
     )
-    return 0
+    return EXIT_OK if report["complete"] else EXIT_PARTIAL
 
 
 def main(argv=None):
@@ -251,28 +328,30 @@ def main(argv=None):
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
-        return int(exc.code) if exc.code is not None else 2
+        return int(exc.code) if exc.code is not None else EXIT_REFUSED
     try:
         if args.command == "collect":
             return run_collect(args)
         if args.command != "dry-run":
             parser.print_usage(sys.stderr)
-            return 2
+            return EXIT_REFUSED
         if not args.paths:
             sys.stderr.write("refused: at least one fixture path is required\n")
-            return 2
+            return EXIT_REFUSED
         payload = dry_run(args.paths, stale_threshold=args.stale_threshold)
     except RefusedInput as exc:
         sys.stderr.write("%s\n" % exc)
-        return 2
-    except github.GitHubError as exc:
+        return EXIT_REFUSED
+    except (github.GitHubError, schema.SchemaError) as exc:
+        # Our own exception classes: fixed wording, paths and counts only.
         sys.stderr.write("error: %s\n" % exc)
-        return 1
-    except (schema.SchemaError, ValueError, OSError) as exc:
-        sys.stderr.write("error: %s\n" % exc)
-        return 1
+        return EXIT_ERROR
+    except Exception as exc:
+        # Anything else: name the class, never its text.
+        sys.stderr.write("error: collection failed (%s)\n" % type(exc).__name__)
+        return EXIT_ERROR
     _print(payload)
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

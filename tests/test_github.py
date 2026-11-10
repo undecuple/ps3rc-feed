@@ -135,7 +135,12 @@ class ClientRequests(CollectorTestCase):
             routes = {"GET /repos/o/r/forks?page=1&per_page=100": ok([api_repo(1, "a/a")], {"link": '<%s>; rel="next"' % bad})}
             client, transport = make_client(routes)
             with self.assertRaises(github.TransportRefused, msg=bad):
-                client.paginate("/repos/o/r/forks", {"per_page": 100}, cap=5)
+                github.check_next_url(bad, "/repos/o/r/forks", "page=1&per_page=100")
+            # The walk keeps page 1, stops, and never requests the hostile URL.
+            pages = client.paginate("/repos/o/r/forks", {"per_page": 100}, cap=5)
+            self.assertEqual([i["id"] for i in pages.items], [1], bad)
+            self.assertIs(pages.complete, False)
+            self.assertEqual(pages.stopped, "response")
             self.assertEqual(len(transport.calls), 1, bad)
 
     def test_page_cap_marks_incomplete_with_a_resume_cursor(self):
@@ -226,7 +231,8 @@ class ClientRequests(CollectorTestCase):
                 client.get_json("/repositories/90", None, expect="object")
             self.assertLess(time.monotonic() - started, 0.5)
             self.assertIs(client.rate_limited, True)
-            self.assertEqual(client.summary()["retry_after"], response["headers"].get("retry-after"))
+            expected = response["headers"].get("retry-after")
+            self.assertEqual(client.summary()["retry_after"], int(expected) if expected is not None else None)
         plain_403 = {"GET /repositories/90": {"status": 403, "headers": {"x-ratelimit-remaining": "40"}, "body": {"message": "forbidden"}}}
         client, _ = make_client(plain_403)
         self.assertEqual(client.get_json("/repositories/90", None, expect="object").status, 403)
@@ -256,8 +262,9 @@ class ClientRequests(CollectorTestCase):
                 client.get_json("/repositories/90", None, expect="object")
             self.assertIn("/repositories/90", str(ctx.exception))
         client, _ = make_client({"GET /repos/o/r/forks?page=1&per_page=100": ok({"items": []})})
-        with self.assertRaises(github.ResponseError):
-            client.paginate("/repos/o/r/forks", {"per_page": 100}, cap=2)
+        pages = client.paginate("/repos/o/r/forks", {"per_page": 100}, cap=2)
+        self.assertIsNone(pages.items)
+        self.assertEqual(pages.stopped, "response")
 
     def test_budget_is_a_hard_stop(self):
         from collector import github

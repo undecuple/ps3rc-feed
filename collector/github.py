@@ -1,33 +1,45 @@
 """Read-only GitHub API client, safe by construction.
 
 What the client can do: HTTPS GET to https://api.github.com and nothing
-else. Every URL is checked before a transport is called: scheme https,
-host exactly api.github.com, no port, no credentials, no fragment, an
-absolute path without "..". Redirects are errors, never followed. The only
-URL ever taken from a response is a `Link: rel="next"` URL, and it is
-accepted only when it points at the same host and the same path as the
-request that produced it, within a page cap.
+else. Every URL is checked before a transport is called: printable ASCII
+only, scheme https, authority exactly api.github.com (so no port, no
+credentials, no other host), no fragment, an absolute path of plain
+segments (no empty, "." or ".." segments, no percent-encoded dot, slash
+or backslash). Redirects are errors, never followed. The only URL ever
+taken from a response is a `Link: rel="next"` URL, accepted only when it
+names the same host, the same path and the same query apart from `page`,
+within a page cap.
 
 Transports are callables `transport(method, url, headers, timeout) ->
 Response`. `RecordedTransport` answers from canned responses and is what
-the tests and the CLI's dry path use. `LiveTransport` uses urllib and is
-constructed only by the CLI's --live path.
+the tests and the CLI's dry path use. `LiveTransport` talks http.client
+directly (no proxy, no redirect handler, no netrc, no cookie jar) and is
+constructed only by the CLI's --live path. Every exception a transport
+raises is mapped to `TransportFailed`, whose message names the exception
+class and nothing else.
 
-Budget: a hard cap on requests per client; page caps per listing. Rate
-limits: an `x-ratelimit-remaining: 0` header, a 429, or a 403 carrying
-`retry-after` or a zero remaining stops the client (RateLimited); the
-client never sleeps, it reports `retry_after` and the reset time.
+Budget: a hard cap on requests per client; page caps per listing; three
+consecutive transport failures stop the client (`NetworkFailed`). Rate
+limits: a parsed `x-ratelimit-remaining` of 0, a 429, or a 403 carrying
+`retry-after` or a zero remaining stops the client (`RateLimited`); the
+client never sleeps and never forgets a recorded limit within a run.
+Header values that are not bounded integers are ignored (unknown).
 
 Responses: body capped (MAX_BODY), strict JSON (no duplicate keys, no
 NaN/Infinity), shape checked against what the endpoint promises; errors
-name the request path and never include the body or any header.
+name the request path and never include a body or a header.
 
-The token is wrapped in `Secret`, whose repr and str are redacted; it is
-written only into the Authorization header handed to the transport.
+The token is wrapped in `Secret`: it must be 1-255 characters of letters,
+digits, '_' or '-' (GitHub tokens fit this), its repr and str are
+redacted, and its text is written only into the Authorization header
+handed to the transport.
 """
 
+import http.client
 import json
 import re
+import ssl
+import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from . import schema
@@ -36,14 +48,22 @@ API_HOST = "api.github.com"
 API_BASE = "https://" + API_HOST
 MAX_BODY = 2 * 1024 * 1024
 DEFAULT_TIMEOUT = 10
+DEFAULT_DEADLINE = 20
+READ_CHUNK = 65536
 USER_AGENT = "ps3rc-feed-collector (read-only; see repository README)"
 API_VERSION = "2022-11-28"
 ACCEPT_JSON = "application/vnd.github+json"
 ACCEPT_RAW = "application/vnd.github.raw"
 DEFAULT_PAGE_CAPS = {"search": 10, "forks": 10, "commits": 5}
+MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3
+MAX_HEADER_INT = 10**12
 
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{1,255}\Z")
+_PRINTABLE_RE = re.compile(r"[\x21-\x7e]{1,2048}\Z")
 _PATH_RE = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*\Z")
+_BAD_ESCAPE_RE = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
 _LINK_RE = re.compile(r'<([^>]*)>\s*;\s*rel="([a-z]+)"')
+_DIGITS_RE = re.compile(r"[0-9]{1,13}\Z")
 
 
 class GitHubError(Exception):
@@ -58,6 +78,14 @@ class ResponseError(GitHubError):
     """The response cannot be used: redirect, oversize, bad JSON or wrong shape."""
 
 
+class TransportFailed(GitHubError):
+    """The transport could not complete the request. Names the exception class only."""
+
+    def __init__(self, exc, path=""):
+        GitHubError.__init__(self, "transport failure (%s) for %s" % (type(exc).__name__, path or "request"))
+        self.kind = type(exc).__name__
+
+
 class RateLimited(GitHubError):
     """The API rate limit is reached; the run must stop."""
 
@@ -66,14 +94,18 @@ class BudgetExhausted(GitHubError):
     """The configured request budget is used up."""
 
 
+class NetworkFailed(GitHubError):
+    """Several transport failures in a row; the run must stop."""
+
+
 class Secret:
     """Holds a token. Its text appears nowhere but in `reveal()`."""
 
     __slots__ = ("_value",)
 
     def __init__(self, value):
-        if not isinstance(value, str) or not value:
-            raise ValueError("a secret must be a non-empty string")
+        if not isinstance(value, str) or _TOKEN_RE.fullmatch(value) is None:
+            raise ValueError("token has an unexpected form (allowed: 1-255 characters of letters, digits, '_' and '-')")
         self._value = value
 
     def reveal(self):
@@ -109,13 +141,21 @@ class Result:
 
 
 class Pages:
-    """Items gathered over pages; `complete` is False when the cap stopped the walk."""
+    """Items gathered over pages.
 
-    def __init__(self, items, complete, next_cursor, status):
+    complete is False when the cap or a stop ended the walk; `stopped` says
+    why ("rate_limited", "budget", "network", "transport", "response",
+    "status" or None); `status` is the first page's HTTP status (None when
+    the first page produced no usable response).
+    """
+
+    def __init__(self, items, complete, next_cursor, status, stopped=None, extra=None):
         self.items = items
         self.complete = complete
         self.next_cursor = next_cursor
         self.status = status
+        self.stopped = stopped
+        self.extra = extra if extra is not None else {}
 
 
 # --- URL rules --------------------------------------------------------------
@@ -123,8 +163,8 @@ class Pages:
 
 def check_url(url):
     """Return (path, query) if `url` is an allowed GET target, else raise TransportRefused."""
-    if not isinstance(url, str) or len(url) > 2048:
-        raise TransportRefused("refused: URL is not a bounded string")
+    if not isinstance(url, str) or _PRINTABLE_RE.fullmatch(url) is None:
+        raise TransportRefused("refused: URL must be printable ASCII without whitespace, at most 2048 characters")
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise TransportRefused("refused: only https is allowed")
@@ -135,8 +175,13 @@ def check_url(url):
     if parts.fragment:
         raise TransportRefused("refused: fragments are not allowed")
     path = parts.path
-    if not path.startswith("/") or _PATH_RE.fullmatch(path) is None or "/../" in path + "/" or "/./" in path + "/":
+    if not path.startswith("/") or _PATH_RE.fullmatch(path) is None:
         raise TransportRefused("refused: path is not a plain API path")
+    if _BAD_ESCAPE_RE.search(path) is not None:
+        raise TransportRefused("refused: percent-encoded dot, slash or backslash in path")
+    segments = path.split("/")[1:]
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise TransportRefused("refused: empty or dot path segment")
     return path, parts.query
 
 
@@ -172,11 +217,29 @@ def parse_link_next(link_header):
     return None
 
 
-def check_next_url(next_url, request_path):
-    """A next URL must be on the API host and name the same path as the request."""
-    path, _ = check_url(next_url)
+def _query_dict(query):
+    pairs = parse_qsl(query, keep_blank_values=True)
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise TransportRefused("refused: repeated query parameter")
+        result[key] = value
+    return result
+
+
+def check_next_url(next_url, request_path, request_query):
+    """A next URL must be on the API host, name the same path and the same query apart from `page`."""
+    path, query = check_url(next_url)
     if path != request_path:
         raise TransportRefused("refused: Link next URL names a different path")
+    mine = _query_dict(request_query)
+    theirs = _query_dict(query)
+    mine.pop("page", None)
+    page = theirs.pop("page", None)
+    if page is None or _DIGITS_RE.fullmatch(page) is None:
+        raise TransportRefused("refused: Link next URL has no page number")
+    if mine != theirs:
+        raise TransportRefused("refused: Link next URL changes the query")
     return next_url
 
 
@@ -207,11 +270,28 @@ def parse_json(body, path):
         raise ResponseError("response for %s is not strict JSON" % path) from None
 
 
+def header_int(value, lo=0, hi=MAX_HEADER_INT):
+    """A header value as a bounded non-negative integer, or None when it is anything else."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if _DIGITS_RE.fullmatch(text) is None:
+        return None
+    number = int(text)
+    if number < lo or number > hi:
+        return None
+    return number
+
+
 # --- transports -------------------------------------------------------------
 
 
 class RecordedTransport:
-    """Canned responses keyed by "GET <path>?<query>". Unknown requests get a 404."""
+    """Canned responses keyed by "GET <path>?<query>". Unknown requests get a 404.
+
+    An entry may be a response dict, a list of them (served in turn), or a
+    dict with "raise": "<ExceptionName>" to simulate a transport failure.
+    """
 
     def __init__(self, routes):
         self.routes = dict(routes)
@@ -236,50 +316,89 @@ class RecordedTransport:
             self._served[key] = index + 1
         if entry is None:
             return Response(404, {"x-recorded": "no-route"}, json.dumps({"message": "Not Found"}))
+        if "raise" in entry:
+            raise _simulated_exception(entry["raise"])
         body = entry.get("body", "")
         if not isinstance(body, (str, bytes)):
             body = json.dumps(body)
         return Response(entry.get("status", 200), entry.get("headers", {}), body)
 
 
-class LiveTransport:
-    """urllib transport for the --live path only. Never constructed by tests.
+def _simulated_exception(name):
+    table = {
+        "TimeoutError": TimeoutError("simulated"),
+        "ConnectionResetError": ConnectionResetError("simulated"),
+        "OSError": OSError("simulated"),
+        "IncompleteRead": http.client.IncompleteRead(b""),
+        "RemoteDisconnected": http.client.RemoteDisconnected("simulated"),
+        "SSLError": ssl.SSLError("simulated"),
+    }
+    return table.get(name, RuntimeError(name))
 
-    https only (no http handler is installed), redirects are not followed
-    (a 3xx comes back as its status and the client refuses it), the body
-    is read up to the cap plus one byte so oversize responses are detected.
+
+class LiveTransport:
+    """http.client transport for the --live path only. Tests drive it with a fake connection class.
+
+    One HTTPSConnection to api.github.com per request, default SSL
+    context, no proxy (http.client reads no proxy environment), no
+    redirect following (a 3xx is returned as its status and the client
+    refuses it), no netrc, no cookies, no Accept-Encoding. The body is read
+    in chunks up to the cap plus one byte under a wall-clock deadline; a
+    body shorter than its Content-Length is a failure, not a 200.
     """
 
-    def __init__(self, timeout=DEFAULT_TIMEOUT, max_body=MAX_BODY):
-        import urllib.request
-
-        class _NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                return None
-
+    def __init__(self, timeout=DEFAULT_TIMEOUT, max_body=MAX_BODY, deadline=DEFAULT_DEADLINE, connection_factory=None):
         self.timeout = timeout
         self.max_body = max_body
-        self._opener = urllib.request.OpenerDirector()
-        self._opener.add_handler(_NoRedirect())
-        self._opener.add_handler(urllib.request.HTTPSHandler())
-        self._opener.add_handler(urllib.request.HTTPErrorProcessor())
-        self._opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+        self.deadline = deadline
+        self._factory = connection_factory
 
     def __call__(self, method, url, headers, timeout):
-        import urllib.error
-        import urllib.request
-
         if method != "GET":
             raise TransportRefused("refused: only GET is allowed")
-        check_url(url)
-        request = urllib.request.Request(url, headers=dict(headers), method="GET")
+        path, query = check_url(url)
+        target = path + ("?" + query if query else "")
+        factory = self._factory or http.client.HTTPSConnection
+        connection = None
         try:
-            with self._opener.open(request, timeout=timeout or self.timeout) as response:
-                body = response.read(self.max_body + 1)
-                return Response(response.status, dict(response.headers), body)
-        except urllib.error.HTTPError as error:
-            body = error.read(self.max_body + 1) if hasattr(error, "read") else b""
-            return Response(error.code, dict(error.headers or {}), body)
+            connection = factory(API_HOST, 443, timeout=timeout or self.timeout, context=ssl.create_default_context())
+            connection.request("GET", target, headers=dict(headers))
+            response = connection.getresponse()
+            status = int(response.status)
+            response_headers = {str(k).lower(): str(v) for k, v in response.getheaders()}
+            body = self._read(response, response_headers, path)
+        except GitHubError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            raise TransportFailed(exc, path) from None
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+        return Response(status, response_headers, body)
+
+    def _read(self, response, headers, path):
+        chunks = []
+        total = 0
+        started = time.monotonic()
+        limit = self.max_body + 1
+        while total < limit:
+            if time.monotonic() - started > self.deadline:
+                raise TransportFailed(TimeoutError("deadline"), path)
+            chunk = response.read(min(READ_CHUNK, limit - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        body = b"".join(chunks)
+        declared = header_int(headers.get("content-length"))
+        if declared is not None and total <= self.max_body and total < declared:
+            raise TransportFailed(http.client.IncompleteRead(b""), path)
+        return body
 
 
 # --- the client -------------------------------------------------------------
@@ -303,12 +422,16 @@ class Client:
         self.rate_limited = False
         self.rate_limit_reset = None
         self.retry_after = None
+        self.consecutive_failures = 0
+        self.transport_failures = 0
+        self.network_failed = False
 
     def __repr__(self):
-        return "Client(requests_made=%d, max_requests=%d, rate_limited=%r, token=%s)" % (
+        return "Client(requests_made=%d, max_requests=%d, rate_limited=%r, network_failed=%r, token=%s)" % (
             self.requests_made,
             self.max_requests,
             self.rate_limited,
+            self.network_failed,
             "set" if self.token is not None else "none",
         )
 
@@ -321,6 +444,8 @@ class Client:
             "rate_limited": self.rate_limited,
             "rate_limit_reset": self.rate_limit_reset,
             "retry_after": self.retry_after,
+            "transport_failures": self.transport_failures,
+            "network_failed": self.network_failed,
             "authenticated": self.token is not None,
         }
 
@@ -330,12 +455,14 @@ class Client:
     # -- requests --
 
     def request(self, method, url, accept=ACCEPT_JSON):
-        """GET an allowed URL. Returns Response; raises before the transport on any refusal."""
+        """GET an allowed URL. Returns Response; raises before the transport on any refusal or stop."""
         if method != "GET":
             raise TransportRefused("refused: only GET is allowed")
         path, query = check_url(url)
         if self.rate_limited:
             raise RateLimited("rate limit reached; not requesting %s" % path)
+        if self.network_failed:
+            raise NetworkFailed("%d consecutive transport failures; not requesting %s" % (self.consecutive_failures, path))
         if self.requests_made >= self.max_requests:
             raise BudgetExhausted("request budget of %d used; not requesting %s" % (self.max_requests, path))
         headers = {"Accept": accept, "User-Agent": USER_AGENT, "X-GitHub-Api-Version": API_VERSION}
@@ -343,9 +470,19 @@ class Client:
             headers["Authorization"] = "Bearer " + self.token.reveal()
         self.requests_made += 1
         self.log.append({"method": "GET", "path": path, "query": query})
-        response = self._transport("GET", url, headers, self.timeout)
+        try:
+            response = self._transport("GET", url, headers, self.timeout)
+        except TransportFailed as exc:
+            raise self._note_transport_failure(exc) from None
+        except GitHubError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            raise self._note_transport_failure(TransportFailed(exc, path)) from None
         if not isinstance(response, Response):
-            raise ResponseError("transport returned no response for %s" % path)
+            raise self._note_transport_failure(TransportFailed(TypeError("no response"), path))
+        self.consecutive_failures = 0
         self._note_rate_limit(response, path)
         if 300 <= response.status < 400:
             raise ResponseError("redirect refused for %s (status %d)" % (path, response.status))
@@ -353,15 +490,24 @@ class Client:
             raise ResponseError("response for %s exceeds %d bytes" % (path, self.max_body))
         return response
 
+    def _note_transport_failure(self, failure):
+        """Count a transport failure; the one that reaches the threshold becomes a NetworkFailed stop."""
+        self.transport_failures += 1
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES:
+            self.network_failed = True
+            return NetworkFailed("%d consecutive transport failures (last: %s)" % (self.consecutive_failures, failure))
+        return failure
+
     def _note_rate_limit(self, response, path):
-        remaining = response.headers.get("x-ratelimit-remaining")
-        reset = response.headers.get("x-ratelimit-reset")
-        retry_after = response.headers.get("retry-after")
-        if reset is not None:
+        remaining = header_int(response.headers.get("x-ratelimit-remaining"))
+        reset = header_int(response.headers.get("x-ratelimit-reset"), lo=1)
+        retry_after = header_int(response.headers.get("retry-after"))
+        if reset is not None and (self.rate_limit_reset is None or reset < self.rate_limit_reset):
             self.rate_limit_reset = reset
         if retry_after is not None:
             self.retry_after = retry_after
-        limited = remaining == "0" or response.status == 429 or (response.status == 403 and retry_after is not None)
+        limited = remaining == 0 or response.status == 429 or (response.status == 403 and retry_after is not None)
         if limited:
             self.rate_limited = True
         if response.status in (403, 429) and limited:
@@ -397,29 +543,43 @@ class Client:
     def paginate(self, path, params, cap, expect="array", items_key=None):
         """Walk Link rel="next" pages from page 1 up to `cap` pages.
 
-        Returns Pages. A non-200 first page yields items None and that
-        status. A page cap stops with complete=False and next_cursor
-        "page=N" naming the page that was not fetched.
+        Returns Pages. A stop (rate limit, budget, network) on page 1 is
+        raised; a failure (transport, unusable response) on page 1 returns
+        no items with `stopped` set; after page 1 the items already fetched
+        are returned with complete=False, a "page=N" cursor and `stopped`.
         """
         if not isinstance(cap, int) or cap < 1:
             raise ValueError("page cap must be a positive integer")
         params = dict(params or {})
         params["page"] = 1
         url = build_url(path, params)
+        _, request_query = check_url(url)
         items = []
         page = 1
         extra = {}
         while True:
-            response = self.get_url(url)
-            result = self._parse(response, path, expect)
+            try:
+                response = self.get_url(url)
+                result = self._parse(response, path, expect)
+            except (RateLimited, BudgetExhausted, NetworkFailed) as exc:
+                if page == 1:
+                    raise
+                return Pages(items, False, "page=%d" % page, 200, _stop_reason(exc), extra)
+            except (TransportFailed, ResponseError, TransportRefused) as exc:
+                reason = "transport" if isinstance(exc, TransportFailed) else "response"
+                if page == 1:
+                    return Pages(None, False, None, None, reason, extra)
+                return Pages(items, False, "page=%d" % page, 200, reason, extra)
             if result.status != 200:
                 if page == 1:
-                    return Pages(None, False, None, result.status)
-                return Pages(items, False, "page=%d" % page, result.status)
+                    return Pages(None, False, None, result.status, None, extra)
+                return Pages(items, False, "page=%d" % page, 200, "status", extra)
             data = result.data
             if items_key is not None:
                 if not isinstance(data.get(items_key), list):
-                    raise ResponseError("response for %s lacks the %r array" % (path, items_key))
+                    if page == 1:
+                        return Pages(None, False, None, None, "response", extra)
+                    return Pages(items, False, "page=%d" % page, 200, "response", extra)
                 for key, value in data.items():
                     if key != items_key:
                         extra[key] = value
@@ -428,16 +588,23 @@ class Client:
                 items.extend(data)
             next_url = parse_link_next(response.headers.get("link"))
             if next_url is None:
-                pages = Pages(items, True, None, 200)
-                pages.extra = extra
-                return pages
-            check_next_url(next_url, path)
+                return Pages(items, True, None, 200, None, extra)
+            try:
+                check_next_url(next_url, path, request_query)
+            except TransportRefused:
+                return Pages(items, False, "page=%d" % (page + 1), 200, "response", extra)
             if page >= cap:
-                pages = Pages(items, False, "page=%d" % (page + 1), 200)
-                pages.extra = extra
-                return pages
+                return Pages(items, False, "page=%d" % (page + 1), 200, None, extra)
             page += 1
             url = next_url
+
+
+def _stop_reason(exc):
+    if isinstance(exc, RateLimited):
+        return "rate_limited"
+    if isinstance(exc, BudgetExhausted):
+        return "budget"
+    return "network"
 
 
 def cursor_page(cursor):

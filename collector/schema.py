@@ -497,8 +497,19 @@ RUN = Obj(
         "repositories": List(REPOSITORY, MAX_REPOSITORIES),
         # Written by validate_run: fields it downgraded instead of refusing the run.
         "rejected_fields": List(REJECTED, MAX_REJECTED),
+        # Written by the collector: whether the fetch finished, and why not.
+        "collection_report": Obj(
+            {
+                "complete": Bool(),
+                "stopped": Nullable(Enum(("rate_limited", "budget", "network"))),
+                "error_count": NonNegInt(),
+                "dropped_items": NonNegInt(),
+                "not_fetched": NonNegInt(),
+                "requests_made": NonNegInt(),
+            }
+        ),
     },
-    optional=("fictional", "rejected_fields"),
+    optional=("fictional", "rejected_fields", "collection_report"),
 )
 
 
