@@ -438,6 +438,42 @@ class L8WritePath(CollectorTestCase):
                 self.assertEqual(fh.read(), "OLD")
             self.assertEqual(sorted(os.listdir(os.path.join(outside, "sub"))), ["run.json"])
 
+    def test_a_target_created_after_the_last_check_is_not_overwritten(self):
+        from collector import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_repo = self._fake_repo(tmp)
+            data = os.path.join(fake_repo, "data")
+            os.makedirs(data)
+            out = os.path.join(data, "race.json")
+            run = {"run_at": RUN_AT, "roots": [], "searches": [], "repositories": []}
+            real_check = cli._check_target
+            seen = []
+
+            def check_then_race(name, dir_fd, overwrite):
+                real_check(name, dir_fd, overwrite)
+                seen.append(name)
+                if len(seen) == 2:
+                    # Another writer creates the target between the final check and the publish step.
+                    with open(out, "w", encoding="utf-8") as fh:
+                        fh.write("OTHER")
+
+            with unittest.mock.patch.object(cli, "REPO_ROOT", fake_repo), unittest.mock.patch.object(cli, "DATA_ROOT", data):
+                with unittest.mock.patch.object(cli, "_check_target", check_then_race):
+                    with self.assertRaises(cli.RefusedInput) as ctx:
+                        cli.write_run_file(run, out)
+                self.assertIn("--overwrite", str(ctx.exception))
+                with open(out, "r", encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), "OTHER")
+                self.assertEqual(sorted(os.listdir(data)), ["race.json"])
+                # Without a race the no-overwrite publish leaves exactly the target, with one link.
+                os.unlink(out)
+                cli.write_run_file(run, out)
+                self.assertEqual(sorted(os.listdir(data)), ["race.json"])
+                self.assertEqual(os.stat(out).st_nlink, 1)
+                with open(out, "r", encoding="utf-8") as fh:
+                    self.assertEqual(json.load(fh)["run_at"], RUN_AT)
+
     def test_failures_leave_no_temp_file_and_keep_the_old_content(self):
         from collector import cli
 
@@ -513,6 +549,23 @@ class L9CliAndDocs(CollectorTestCase):
             with unittest.mock.patch.object(github, "LiveTransport", factory):
                 code, out, err = _run_cli(["collect", "--config", self.config_path, "--live", "--max-requests", "20", "--run-at", RUN_AT] + extra, env=env or {"GITHUB_TOKEN": SENTINEL})
         return code, out, err, holder.get("transport")
+
+    def test_cli_docstring_names_no_untracked_document(self):
+        from collector import cli
+
+        self.assertNotIn("code-path document", cli.__doc__)
+        for name in ("collector/github.py", "collector/collect.py"):
+            self.assertIn(name, cli.__doc__)
+            self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, name)))
+
+    def test_an_out_name_too_long_for_the_temp_file_is_refused_before_any_request(self):
+        for bad in ("data/" + "a" * 250 + ".json", "data/" + "\u00e9" * 100 + ".json"):
+            code, out, err, transport = self._live(["--out", bad])
+            self.assertEqual(code, 2, len(bad))
+            self.assertIn("longer than 200 bytes", err)
+            self.assertIsNone(transport)
+        code, out, err, _ = self._live(["--out", "data/" + "a" * 195 + ".json"])
+        self.assertEqual(code, 0, err)
 
     def test_live_with_recorded_control_characters_and_overwrite(self):
         code, out, err, transport = self._live(["--out", "data/a.json", "--recorded", "tests/fixtures/github_recorded/network.json"])

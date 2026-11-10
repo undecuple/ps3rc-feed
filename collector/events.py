@@ -848,7 +848,7 @@ def apply_run(state, run, config=None):
     the caller's state is replaced. On any error the caller's state is
     untouched. The events are also appended to state["events"].
     """
-    schema.validate_run(run)
+    run = schema.validate_run(run)
     if config is None:
         config = Config()
     run_at = run["run_at"]

@@ -7,7 +7,11 @@ Order of work in `collect`:
    when the page cap or a stop ended the walk, when an item had to be
    dropped, when the listing exceeded the run format's cap, or when
    total_count exceeds the distinct ids listed (this covers the API's
-   1000-result ceiling).
+   1000-result ceiling). Search requests draw from GitHub's separate
+   search rate-limit bucket (10 a minute anonymous, 30 authenticated):
+   when that bucket is exhausted the remaining searches are marked
+   complete=false with a resume cursor and the run goes on with the other
+   endpoints; the report says search_rate_limited.
 2. Roots: GET /repos/{owner}/{repo}/forks per configured root (per_page
    100, page cap). A capped or interrupted walk sets forks_scan_complete
    false and a resume_cursor "page=N".
@@ -15,22 +19,26 @@ Order of work in `collect`:
    bounded by max_repositories. For each: GET /repositories/{id} (by id,
    so renames are followed), then GET .../commits?sha=<default branch>&
    since=<run_at minus the window>&per_page=100 (page cap; a cap sets
-   commits_complete false), GET .../releases?per_page=30 (drafts,
-   unpublished and id-less entries skipped), GET .../readme with the raw
-   media type (cut to readme_bytes). Statuses: 404/410 -> not_found, 451
-   and plain 403 -> blocked, other non-200 -> failed; a malformed body, a
-   redirect, an oversize body, bad JSON or a transport failure on the
-   metadata request -> failed. The same on a sub-request leaves that field
-   null (the repository is then partial) and the run continues. Metadata
-   that lacks fork, archived, stargazers_count or default_branch is
-   partial too. Every such failure is counted in a bounded report.
-4. A rate limit, the request budget or repeated transport failures stop
-   the run: what was fetched is kept; a repository whose request was
-   actually made and refused is marked rate_limited (or failed); a
-   repository that was never requested is simply absent from the run (its
-   previous observation, if any, stays as it was) and is counted in
-   collection_report.not_fetched. Nothing is ever recorded as zero because
-   it was not fetched.
+   commits_complete false; a 409, GitHub's answer for an empty
+   repository, is an empty complete listing), GET .../releases?per_page=30
+   (drafts, unpublished and id-less entries skipped), GET .../readme with
+   the raw media type (cut to readme_bytes). Statuses: 404/410 ->
+   not_found, 451 and plain 403 -> blocked, other non-200 -> failed; a
+   malformed body, a redirect, an oversize body, bad JSON or a transport
+   failure on the metadata request -> failed. The same on a sub-request
+   leaves that field null (the repository is then partial) and the run
+   continues. Metadata that lacks fork, archived, stargazers_count or
+   default_branch is partial too. Every such failure is counted in a
+   bounded report. Pagination follows GitHub's next links, which spell
+   /repos/{owner}/{repo}/... as /repositories/{id}/...; the id must be the
+   one the metadata request returned.
+4. A core rate limit, a secondary limit, the request budget or repeated
+   transport failures stop the run: what was fetched is kept; a repository
+   whose request was actually made and refused is marked rate_limited (or
+   failed); a repository that was never requested is simply absent from
+   the run (its previous observation, if any, stays as it was) and is
+   counted in collection_report.not_fetched. Nothing is ever recorded as
+   zero because it was not fetched.
 5. The run carries a bounded `collection_report` (complete, stop reason,
    counts) so a partial run is visible in the file, and is validated with
    the strict loader before it is returned; the loader cannot be made to
@@ -45,14 +53,11 @@ Repository text is copied as data; the loader bounds it and the renderer
 escapes it. URLs from responses (html_url and friends) are ignored.
 """
 
-import os
 import re
 from datetime import datetime, timedelta, timezone
 
 from . import github, schema
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXAMPLE_CONFIG_PATH = os.path.join(REPO_ROOT, "config", "sources.example.json")
+from .paths import EXAMPLE_CONFIG_PATH, REPO_ROOT  # noqa: F401  (REPO_ROOT re-exported for callers)
 
 DEFAULT_COMMIT_WINDOW_DAYS = 30
 DEFAULT_MAX_REQUESTS = 500
@@ -65,8 +70,10 @@ MAX_REPORT_ERRORS = 100
 # Items kept per listing: the run format's own caps, so validate_run cannot be exceeded by a listing.
 LIST_CAPS = {"search": schema.MAX_IDS, "forks": schema.MAX_IDS, "commits": schema.MAX_COMMITS, "releases": schema.MAX_RELEASES}
 METADATA_EXPECTED = ("fork", "archived", "stargazers_count", "default_branch")
+EMPTY_REPOSITORY_STATUS = 409
 
 _SPACE_RE = re.compile(r"\s+")
+_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9_\-]+")
 
 ROOT_CONFIG = schema.Obj({"repository_id": schema.PositiveId(), "full_name": schema.FULL_NAME})
 PAGE_CAPS = schema.Obj(
@@ -156,9 +163,6 @@ def load_config(path):
 
 def _normalise_name(value):
     return _SPACE_RE.sub(" ", value.strip()).lower()
-
-
-_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9_\-]+")
 
 
 def _tokens(value):
@@ -397,7 +401,9 @@ class _Stop(Exception):
 
 _STOPS = (github.RateLimited, github.BudgetExhausted, github.NetworkFailed)
 _FAILURES = (github.ResponseError, github.TransportFailed, github.TransportRefused)
-_STOP_REASONS = ("rate_limited", "budget", "network")
+# Reasons that end the whole run; the search bucket running out does not.
+_RUN_STOPS = ("rate_limited", "budget", "network")
+SEARCH_STOP = "search_rate_limited"
 
 
 def _failure_kind(exc):
@@ -416,6 +422,7 @@ def collect(client, config, run_at):
     run = {"run_at": run_at, "roots": [], "searches": [], "repositories": []}
     report = {
         "stopped": None,
+        "search_stopped": False,
         "errors": [],
         "error_count": 0,
         "dropped_items": 0,
@@ -431,11 +438,11 @@ def collect(client, config, run_at):
         if len(report["errors"]) < MAX_REPORT_ERRORS:
             report["errors"].append({"path": path, "reason": reason})
 
-    def attempt(path, action, *args):
-        """One request. Returns (value, None) or (None, failure kind); raises _Stop on a stop."""
+    def attempt(path, action, *args, **kwargs):
+        """One request. Returns (value, None) or (None, failure kind); raises _Stop on a run stop."""
         before = client.requests_made
         try:
-            return action(*args), None
+            return action(*args, **kwargs), None
         except _STOPS as exc:
             raise _Stop(github._stop_reason(exc), client.requests_made > before)
         except _FAILURES as exc:
@@ -464,9 +471,12 @@ def collect(client, config, run_at):
         return ids
 
     def after_pages(path, pages):
-        """A stop seen mid-walk ends the run; any other interruption is an error note."""
-        if pages.stopped in _STOP_REASONS:
+        """A run stop seen mid-walk ends the run; a search-bucket stop is noted; other interruptions are errors."""
+        if pages.stopped in _RUN_STOPS:
             raise _Stop(pages.stopped, True)
+        if pages.stopped == SEARCH_STOP:
+            report["search_stopped"] = True
+            return
         if pages.stopped is not None:
             note_error(path, pages.stopped)
 
@@ -474,10 +484,25 @@ def collect(client, config, run_at):
         for query in config["queries"]:
             entry = {"query": query, "complete": False, "repository_ids": []}
             run["searches"].append(entry)
-            pages, failed = attempt("/search/repositories", client.paginate, "/search/repositories", {"q": query, "per_page": PER_PAGE}, caps["search"], "object", "items")
+            if report["search_stopped"]:
+                # The search bucket is exhausted: do not ask, record where to resume.
+                entry["resume_cursor"] = "page=1"
+                continue
+            try:
+                pages, failed = attempt("/search/repositories", client.paginate, "/search/repositories", {"q": query, "per_page": PER_PAGE}, caps["search"], "object", "items")
+            except _Stop as stop:
+                if stop.reason != SEARCH_STOP:
+                    raise
+                report["search_stopped"] = True
+                entry["resume_cursor"] = "page=1"
+                continue
             if failed or pages.items is None:
                 if not failed:
-                    note_error("/search/repositories", pages.stopped or "status")
+                    after_pages("/search/repositories", pages)
+                    if pages.stopped == SEARCH_STOP:
+                        entry["resume_cursor"] = "page=1"
+                    elif pages.stopped is None:
+                        note_error("/search/repositories", "status")
                 continue
             before = report["dropped_items"]
             items, overflow = capped(pages.items, "search")
@@ -490,6 +515,8 @@ def collect(client, config, run_at):
             # total_count above the distinct ids listed covers the API's 1000-result ceiling too.
             capped_total = isinstance(total, int) and not isinstance(total, bool) and total > len(entry["repository_ids"])
             entry["complete"] = bool(pages.complete and clean and not overflow and incomplete is not True and not capped_total)
+            if not pages.complete and pages.next_cursor is not None:
+                entry["resume_cursor"] = pages.next_cursor
             after_pages("/search/repositories", pages)
 
         for root in config["roots"]:
@@ -499,10 +526,12 @@ def collect(client, config, run_at):
             entry = {"repository_id": rid, "full_name": full_name, "forks_scan_complete": False, "found_repository_ids": []}
             run["roots"].append(entry)
             path = github.path_for_repo(full_name, "/forks")
-            pages, failed = attempt(path, client.paginate, path, {"per_page": PER_PAGE}, caps["forks"])
+            pages, failed = attempt(path, client.paginate, path, {"per_page": PER_PAGE}, caps["forks"], repository_id=rid)
             if failed or pages.items is None:
                 if not failed:
-                    note_error(path, pages.stopped or "status")
+                    after_pages(path, pages)
+                    if pages.stopped is None:
+                        note_error(path, "status")
                 continue
             before = report["dropped_items"]
             items, overflow = capped(pages.items, "forks")
@@ -528,7 +557,7 @@ def collect(client, config, run_at):
             except _Stop as stop:
                 if stop.requested:
                     # The request was made and refused: that is a real failure state.
-                    state = "rate_limited" if stop.reason == "rate_limited" else "failed"
+                    state = "rate_limited" if stop.reason in ("rate_limited", SEARCH_STOP) else "failed"
                     run["repositories"].append(_empty_repository(rid, full_name, state))
                 raise
             if failed or result.status != 200:
@@ -548,7 +577,7 @@ def collect(client, config, run_at):
             branch = meta["default_branch"]
             if branch is not None:
                 cpath = github.path_for_repo(meta["full_name"], "/commits")
-                pages, failed = attempt(cpath, client.paginate, cpath, {"sha": branch, "since": since, "per_page": PER_PAGE}, caps["commits"])
+                pages, failed = attempt(cpath, client.paginate, cpath, {"sha": branch, "since": since, "per_page": PER_PAGE}, caps["commits"], repository_id=rid)
                 if not failed and pages.items is not None:
                     items, overflow = capped(pages.items, "commits")
                     commits, dropped = adapt_commits(items, cpath)
@@ -556,8 +585,14 @@ def collect(client, config, run_at):
                     repo["commits"] = commits
                     repo["commits_complete"] = bool(pages.complete and dropped == 0 and not overflow)
                     after_pages(cpath, pages)
+                elif not failed and pages.status == EMPTY_REPOSITORY_STATUS:
+                    # GitHub answers 409 for a repository without commits: an empty, complete listing.
+                    repo["commits"] = []
+                    repo["commits_complete"] = True
                 elif not failed:
-                    note_error(cpath, pages.stopped or "status")
+                    after_pages(cpath, pages)
+                    if pages.stopped is None:
+                        note_error(cpath, "status")
             rpath = github.path_for_repo(meta["full_name"], "/releases")
             result, failed = attempt(rpath, client.get_json, rpath, {"per_page": RELEASES_PER_PAGE}, "array")
             if not failed and result.status == 200:
@@ -575,8 +610,11 @@ def collect(client, config, run_at):
             elif not failed and result.status != 404:
                 note_error(dpath, "status")
     except _Stop as stop:
-        report["stopped"] = stop.reason
+        # The search phase handles its own bucket; a search limit raised anywhere else ends the run.
+        report["stopped"] = "rate_limited" if stop.reason == SEARCH_STOP else stop.reason
 
+    if report["stopped"] is None and report["search_stopped"]:
+        report["stopped"] = SEARCH_STOP
     listed = set(r["repository_id"] for r in run["repositories"])
     unfetched = set(report["not_fetched_repository_ids"]) | ((set(candidates) | root_ids) - listed)
     report["not_fetched_repository_ids"] = sorted(unfetched)[: schema.MAX_IDS]
@@ -599,7 +637,7 @@ def collect(client, config, run_at):
         "requests_made": client.requests_made,
     }
     try:
-        schema.validate_run(run)
+        run = schema.validate_run(run)
     except schema.SchemaError:
         raise InternalError() from None
     report["complete"] = complete

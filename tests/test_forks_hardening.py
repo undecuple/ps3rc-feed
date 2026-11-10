@@ -360,8 +360,7 @@ class G7Comparisons(CollectorTestCase):
     def test_future_collected_at_is_clamped_at_load(self):
         from collector import schema
 
-        data = run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, "2027-01-01T00:00:00Z"))])
-        schema.validate_run(data)
+        data = schema.validate_run(run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, "2027-01-01T00:00:00Z"))]))
         c = data["repositories"][1]["comparison"]
         self.assertEqual(c["collected_at"], T(5))
         self.assertIs(c["future_dated"], True)
@@ -391,8 +390,7 @@ class G8HostileFieldsNeverRefuseTheRun(CollectorTestCase):
         from collector import catalog, schema
 
         for ref in ("javascript:alert(1)", "@everyone", "<b>x</b>", "x‮evil", "http://invalid.example/", "a..b", "a@{b", ".hidden", "with space", "a/.b"):
-            data = run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, T(5), base_ref=ref))])
-            schema.validate_run(data)
+            data = schema.validate_run(run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, T(5), base_ref=ref))]))
             c = data["repositories"][1]["comparison"]
             self.assertEqual((c["state"], c["ahead"], c["base_ref"]), ("unavailable", None, None), ref)
             self.assertEqual(data["rejected_fields"], [{"path": "repositories[1].comparison.base_ref", "reason": "invalid_ref"}])
@@ -410,12 +408,10 @@ class G8HostileFieldsNeverRefuseTheRun(CollectorTestCase):
         self.assertEqual(events[2][0]["details"]["previous_ahead"], 5)
         self.assertEqual(catalog.collection_status(state)["rejected_fields"], [])
         for ok in ("main", "feature/x-y", "release+1.2", "v1.0"):
-            data = run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, T(5), base_ref=ok))])
-            schema.validate_run(data)
+            data = schema.validate_run(run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, T(5), base_ref=ok))]))
             self.assertEqual(data["repositories"][1]["comparison"]["base_ref"], ok)
         # An over-long ref is cut to the text bound first and then judged on its characters.
-        data = run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, T(5), base_ref="a" * 300))])
-        schema.validate_run(data)
+        data = schema.validate_run(run(T(5), [frame(), skyfall(comparison=cmp("complete", 5, 0, T(5), base_ref="a" * 300))]))
         self.assertEqual(data["repositories"][1]["comparison"]["base_ref"], "a" * schema.MAX_TAG)
         self.assertEqual(data["rejected_fields"], [])
 
@@ -423,16 +419,14 @@ class G8HostileFieldsNeverRefuseTheRun(CollectorTestCase):
         from collector import catalog, schema
 
         roots = [{"repository_id": 90, "full_name": FRAME, "forks_scan_complete": False, "found_repository_ids": [], "resume_cursor": "javascript:alert(1)//@everyone‮<x>"}]
-        data = run(T(5), [frame()], roots=roots)
-        schema.validate_run(data)
+        data = schema.validate_run(run(T(5), [frame()], roots=roots))
         self.assertIsNone(data["roots"][0]["resume_cursor"])
         self.assertEqual(data["rejected_fields"], [{"path": "roots[0].resume_cursor", "reason": "invalid_cursor"}])
         state, _ = self.assertDeterministic([data])
         self.assertIsNone(state["collection"]["roots"]["90"]["resume_cursor"])
         self.assertEqual(catalog.collection_status(state)["rejected_fields"][0]["reason"], "invalid_cursor")
         good = dict(roots[0], resume_cursor="page=2:abc/def+g")
-        data = run(T(5), [frame()], roots=[good])
-        schema.validate_run(data)
+        data = schema.validate_run(run(T(5), [frame()], roots=[good]))
         self.assertEqual(data["rejected_fields"], [])
 
     def test_search_query_with_a_url_is_a_clear_schema_error(self):

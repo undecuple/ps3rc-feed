@@ -6,8 +6,12 @@ state transition, the run timestamp at which the transition was observed.
 They never contain repository text and they survive state loss: replaying
 the same run files gives the same ids.
 
-Field names follow the sample in site-draft/data/feed.json where the two
-agree; the differences are listed in .local/STATUS.md.
+Field names: `event_id`, `type`, `repository_id` (the integer GitHub id),
+`repository` (owner/name), `owner`, `game_key`, `game_title`,
+`game_inferred`, `toolkit`, `source_at`, `observed_at`, `title`,
+`summary`, `source_url`, `details`. Renderer-facing text (`title`,
+`summary`, `game_title`, strings in `details`) is already HTML-escaped
+and bounded; a renderer must not escape it again or insert it as raw HTML.
 """
 
 import hashlib
