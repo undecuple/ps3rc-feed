@@ -4,14 +4,14 @@
 
 # ps3rc-feed
 
-An automated activity feed for PS3 recompilation projects on GitHub. The goal is a searchable index of repositories
-(including forks of ps3recomp and of game projects), an RSS feed, a Discord channel feed, and a terminal-style website.
+An automated, unofficial activity feed for PS3 recompilation projects on GitHub.
 
-**Status: early.** The collector core exists and runs on recorded and fictional data, and can make a live read-only
-run. The static page in `site/` is a design preview on sample data (see `site/README.md`). No real data is published:
-there is no RSS feed, no Discord bot, and no dataset in this repository.
+[Live page](https://undecuple.github.io/ps3rc-feed/) · [Tests](https://github.com/undecuple/ps3rc-feed/actions/workflows/tests.yml) · [MIT licence](LICENSE)
 
-## What it will and will not be
+**Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data, published by hand. It is not
+real time, and the page shows its own collection time. The last collection may be incomplete, and the page says so.
+
+## What it is and is not
 
 - An automated, unofficial index. Project discovery, game associations, toolkit detection and descriptions may be
   wrong, incomplete or out of date. Those labels are inferred.
@@ -22,65 +22,79 @@ there is no RSS feed, no Discord bot, and no dataset in this repository.
 
 ## What exists
 
-A Python standard-library collector in `collector/`, developed and tested on Python 3.14, with offline unit tests in
-`tests/` that run in CI. The tests block network access.
+- **Live page** in `site/`: a feed, a catalog table and a fork view, with filters, search, sorting by clicking a column
+  heading, a stars column, and headings that stay visible while scrolling. Forks with no stars and no recent commits are hidden until you search or switch them on. Details are in `site/README.md`.
+- **Collector** in `collector/`: a Python standard-library program, developed and tested on Python 3.14. It makes
+  read-only GET requests to `api.github.com` with a hard request budget and stops on rate limits.
+- **Event model:** repositories are tracked by GitHub repository ID, and the first run is a baseline that creates no
+  events. Unknown values stay `null`. Incomplete collection is flagged as incomplete.
+- **Forks:** fork networks are followed from configured root repositories. A game association inherited from a parent
+  is labelled inherited and unverified.
+- **Export:** `export` turns run files into the `feed.json` and `manifest.json` the page reads, and can keep its state
+  between runs. See [docs/export.md](docs/export.md).
+- **Tests:** offline unit tests in `tests/` run in CI. They block network access.
 
-- **Event model:** repositories are tracked by GitHub repository ID, observations are persisted, and the first run is
-  a baseline that creates no events. A re-run on unchanged data creates none either. Unknown values stay `null`;
-  incomplete collection is flagged as incomplete.
-- **Forks:** fork networks are followed from configured root repositories, with ancestry kept as reported. A
-  repository reached through several roots is one entry. A game association inherited from a parent is labelled
-  inherited and unverified.
-- **GitHub client:** read-only GET requests to `api.github.com`, with a hard request budget, a stop on rate limits,
-  size and time limits, and repository text treated as untrusted data.
-- **Site export:** `export` applies run files from `data/` through the same event model, in run order, and writes the
-  `feed.json` and `manifest.json` the page in `site/` reads. Text is plain (the page sets it with `textContent`), the
-  only links are `https://github.com/owner/name` repository URLs, unknown values are `null`, and the newest 500
-  events are kept. The output is deterministic: the same run files in any order give the same bytes (two run files
-  with the same `run_at` are refused), `generated_at` is the newest run's `run_at`, and the manifest `version` is the
-  first 16 hex digits of the feed's SHA-256. The feed's `collection` object describes the newest run (`complete`,
-  `stopped`, `not_fetched`, `error_count`, `last_run_at`), and `--stale-after-minutes N` adds `stale_after_minutes`
-  for the page's stale check.
-- **State between exports:** `--state-out` saves the store after the runs are applied, and `--state-in` starts the
-  next export from it, so a daily job applies one new run on top of the previous state. A saved state plus the next
-  run gives the same feed bytes as both runs from scratch. A run that is not newer than the state's last run is
-  refused.
-
-Not built yet: publishing the exported feed to the site, and the RSS and Discord feeds.
+Not built yet: RSS and Discord feeds.
 
 ## Using it
 
     python3 -B -m unittest discover -s tests
 
     # request plan only, no network
-    python3 -B -m collector.cli collect --config config/sources.example.json
+    python3 -B -m collector collect --config config/sources.example.json
 
     # live, read-only GET requests to api.github.com
-    GITHUB_TOKEN=... python3 -B -m collector.cli collect --config <your config> --live \
+    GITHUB_TOKEN=... python3 -B -m collector collect --config <your config> --live \
         --max-requests 300 --out data/run.json
 
     # site feed from run files, no network
-    python3 -B -m collector export --runs data/run-001.json data/run-002.json --out-dir data/site
+    python3 -B -m collector export --runs data/run-001.json --out-dir data/site
 
-    # the next day: apply one new run on top of the saved state
-    python3 -B -m collector export --runs data/run-003.json --out-dir data/site --overwrite \
+    # next time: apply one new run on top of the saved state
+    python3 -B -m collector export --runs data/run-002.json --out-dir data/site --overwrite \
         --state-in data/state.json --state-out data/state.json --stale-after-minutes 1500
 
-A live run needs `--max-requests` and `--out` under `data/` (which git ignores), and either `GITHUB_TOKEN` (a token
-with no permissions is enough for public data) or `--anonymous`. It refuses the placeholder example config. Exit
-codes: 0 complete, 3 partial (for example stopped by the budget or a rate limit), 1 error, 2 refused. The live write
-path uses POSIX file operations, so it targets Linux and macOS. `export` follows the same rules: inputs and
-`--out-dir` under `data/`, no symbolic links, existing files replaced only with `--overwrite`; it exits 0 when written,
-1 on an invalid run file or state file, 2 when refused. `--state-in` and `--state-out` follow the same rules and may
-name the same file only with `--overwrite`. Every check runs before anything is read, and every output is built before
-the first write. The state is written first, then `feed.json`, then `manifest.json`: if a later write fails, the
-page keeps the previous feed, the next export from the saved state publishes this run, and repeating this run is
-refused instead of being applied twice. `python3 -m collector` and `python3 -m collector.cli` are the same command.
+A live run needs `--max-requests` and `--out` under `data/`, and either `GITHUB_TOKEN` or `--anonymous`. A token with
+no permissions is enough for public data. Put it in the environment of the command and never in a file. The collector
+refuses the placeholder example config. The live write path uses POSIX file operations, so it targets Linux and macOS.
 
-`config/sources.example.json` holds fictional placeholders only. The real roots and search queries are not committed.
+`data/` is ignored by git. Run files are never committed.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | complete (for `export`: files written) |
+| 1 | error (for `export`: an invalid run or state file) |
+| 2 | refused |
+| 3 | partial, for example stopped by the budget or a rate limit |
+
+`config/sources.example.json` holds fictional placeholders only. The real roots and search queries are not committed
+yet.
+
+## Search terms and the relevance filter
+
+Searching for game names also matches unrelated repositories. A search for a word like "killzone" returns trading
+scripts, class projects and profile pages next to the few repositories about the games. Results from such terms need a
+relevance filter before they go on the page. That filter is planned and not built, so only the PS3 recompilation
+searches feed the page for now.
+
+## Planned automation
+
+Planned, not running. Each step is its own reviewed change.
+
+1. Read the page's notice text from the feed.
+2. A reviewed config with a relevance filter.
+3. A scheduled workflow on GitHub runners that uses the built-in token.
+4. Switch it on only after the maintainer approves.
+
+## How AI was used
+
+Most of the code, tests and documentation were written with AI agent assistance (Claude Code). Changes go through
+review and CI before they are merged, and the page labels what the data is.
+
+## Related projects
+
+- [ps3recomp](https://github.com/sp00nznet/ps3recomp), the toolkit whose fork network the collector follows.
 
 ## Licence
 
 [MIT](LICENSE). The banner and social preview are text-only renders set in IBM Plex Mono (SIL Open Font License 1.1).
-
-Developed with AI agent assistance.
