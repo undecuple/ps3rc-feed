@@ -1,7 +1,5 @@
 {
- "version": "2026-11-09T14:32:00Z-sample",
- "generated_at": "2026-11-09T14:32:00Z",
  "feed": "feed.json",
- "sample": true,
- "poll_seconds": 60
+ "generated_at": "2026-11-10T04:15:58Z",
+ "version": "8552ef76117f2eb3"
 }

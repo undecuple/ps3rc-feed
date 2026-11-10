@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const T = require('./terminal.js');
 
-const feed = JSON.parse(fs.readFileSync(__dirname + '/data/feed.json', 'utf8'));
+const feed = JSON.parse(fs.readFileSync(__dirname + '/testdata/feed.json', 'utf8'));
 const NOW = Date.parse(feed.generated_at);
 const { repos, events } = T.joinData(feed, NOW);
 const ctx = {
@@ -349,10 +349,10 @@ test('tokenizer handles quotes', () => {
 });
 
 test('sample data is fictional and in sync with the embedded fallback', () => {
-  const fallback = fs.readFileSync(__dirname + '/data/feed-fallback.js', 'utf8');
+  const fallback = fs.readFileSync(__dirname + '/testdata/feed-fallback.js', 'utf8');
   assert.equal(fallback.trim(), 'window.PS3RC_FALLBACK = ' + JSON.stringify(feed) + ';');
   assert.equal(feed.sample, true);
-  const manifest = JSON.parse(fs.readFileSync(__dirname + '/data/manifest.json', 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(__dirname + '/testdata/manifest.json', 'utf8'));
   assert.equal(manifest.version, feed.version);
   assert.ok(feed.repos.every((r) => r.sample === true && !('url' in r)));
   assert.ok(feed.events.every((e) => e.sample === true));
@@ -385,4 +385,25 @@ test('an event without a source time shows its collection time, not the viewer c
   const shown = T.execute(T.initialState(), 'show x1', { now: Date.parse(f.generated_at), find: (id) => j.events.find((r) => r.id === id) || null, values: {}, info: [] });
   assert.ok(shown.out.some((l) => /source time: unknown/.test(l.text)));
   assert.ok(shown.out.some((l) => /collected:\s+2026-11-10 04:15 UTC/.test(l.text)));
+});
+
+test('served data/ is the real export, and the fallback can never show the sample', () => {
+  const crypto = require('node:crypto');
+  const bytes = fs.readFileSync(__dirname + '/data/feed.json');
+  const real = JSON.parse(bytes.toString('utf8'));
+  const manifest = JSON.parse(fs.readFileSync(__dirname + '/data/manifest.json', 'utf8'));
+  assert.equal(fs.readFileSync(__dirname + '/data/feed-fallback.js', 'utf8'), 'window.PS3RC_FALLBACK = null;\n');
+  assert.equal(manifest.version, crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16));
+  assert.equal(manifest.generated_at, real.generated_at);
+  assert.notEqual(real.sample, true);
+  assert.ok(real.repos.length > 0 && real.events.length > 0);
+  assert.ok(real.repos.every((r) => r.sample !== true && T.safeGithubUrl(r.url) === r.url));
+  assert.ok(real.events.every((e) => e.sample !== true && real.repos.some((r) => r.id === e.repo_id)));
+  // no fictional sample names leak into the served feed
+  assert.ok(!/example-dev|example-org|Sample Racer/.test(bytes.toString('utf8')));
+  // every event time is a collected time from the feed, never the viewer clock
+  const later = Date.parse(real.generated_at) + 86400000 * 365;
+  const joined = T.joinData(real, later);
+  assert.ok(joined.events.every((e, i) => e.time === Date.parse(real.events[i].source_at || real.events[i].observed_at)));
+  assert.ok(joined.events.every((e) => e.time <= Date.parse(real.generated_at)));
 });
