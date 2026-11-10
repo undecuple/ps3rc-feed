@@ -1,0 +1,39 @@
+{
+  "run_at": "2026-11-05T12:00:00Z",
+  "fictional": true,
+  "roots": [],
+  "searches": [
+    {
+      "query": "ps3recomp in:name",
+      "complete": true,
+      "repository_ids": [
+        100
+      ]
+    }
+  ],
+  "repositories": [
+    {
+      "repository_id": 100,
+      "full_name": "new-owner/skyfall-recomp-renamed",
+      "owner": "new-owner",
+      "description": "Recomp of Skyfall (fictional)",
+      "readme_excerpt": "# Skyfall\n",
+      "is_fork": true,
+      "parent_repository_id": 90,
+      "network_root_repository_id": 90,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "000000000000000000000000000000000000000a",
+          "committed_at": "2026-11-03T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    }
+  ]
+}

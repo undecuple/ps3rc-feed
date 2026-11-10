@@ -1,0 +1,184 @@
+{
+  "run_at": "2026-11-06T00:00:00Z",
+  "fictional": true,
+  "roots": [
+    {
+      "repository_id": 90,
+      "full_name": "frame-org/ps3recomp-example",
+      "forks_scan_complete": true,
+      "found_repository_ids": [
+        100,
+        301,
+        303,
+        304
+      ]
+    },
+    {
+      "repository_id": 100,
+      "full_name": "game-org/skyfall-recomp",
+      "forks_scan_complete": true,
+      "found_repository_ids": [
+        301,
+        302
+      ]
+    }
+  ],
+  "searches": [
+    {
+      "query": "ps3recomp in:name",
+      "complete": true,
+      "repository_ids": [
+        90,
+        100,
+        301,
+        302,
+        303
+      ]
+    }
+  ],
+  "repositories": [
+    {
+      "repository_id": 90,
+      "full_name": "frame-org/ps3recomp-example",
+      "owner": "frame-org",
+      "description": "Fictional framework",
+      "readme_excerpt": "# Fictional\n",
+      "is_fork": false,
+      "parent_repository_id": null,
+      "network_root_repository_id": null,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000001",
+          "committed_at": "2026-11-01T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    },
+    {
+      "repository_id": 100,
+      "full_name": "game-org/skyfall-recomp",
+      "owner": "game-org",
+      "description": "Recomp of Skyfall (fictional)",
+      "readme_excerpt": "# Skyfall\n",
+      "is_fork": true,
+      "parent_repository_id": 90,
+      "network_root_repository_id": 90,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "000000000000000000000000000000000000000a",
+          "committed_at": "2026-11-03T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    },
+    {
+      "repository_id": 301,
+      "full_name": "fork-a/skyfall-recomp",
+      "owner": "fork-a",
+      "description": "Fictional fork",
+      "readme_excerpt": "# Fictional\n",
+      "is_fork": true,
+      "parent_repository_id": 100,
+      "network_root_repository_id": 90,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "000000000000000000000000000000000000000a",
+          "committed_at": "2026-11-03T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    },
+    {
+      "repository_id": 303,
+      "full_name": "fork-c/unrelated-name",
+      "owner": "fork-c",
+      "description": null,
+      "readme_excerpt": "",
+      "is_fork": true,
+      "parent_repository_id": 90,
+      "network_root_repository_id": 90,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000001",
+          "committed_at": "2026-11-01T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    },
+    {
+      "repository_id": 302,
+      "full_name": "fork-b/skyfall-recomp",
+      "owner": "fork-b",
+      "description": "Fictional nested fork",
+      "readme_excerpt": "# Fictional\n",
+      "is_fork": true,
+      "parent_repository_id": 301,
+      "network_root_repository_id": 90,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "000000000000000000000000000000000000000a",
+          "committed_at": "2026-11-03T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    },
+    {
+      "repository_id": 304,
+      "full_name": "fork-d/late-fork",
+      "owner": "fork-d",
+      "description": "Fictional project",
+      "readme_excerpt": "# Fictional\n",
+      "is_fork": true,
+      "parent_repository_id": 303,
+      "network_root_repository_id": 90,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000001",
+          "committed_at": "2026-11-01T12:00:00Z",
+          "message": "fictional change"
+        },
+        {
+          "sha": "000000000000000000000000000000000000003c",
+          "committed_at": "2026-11-06T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "run_at": "2026-11-06T00:00:00Z",
+  "fictional": true,
+  "roots": [],
+  "searches": [
+    {
+      "query": "ps3recomp in:name",
+      "complete": true,
+      "repository_ids": [
+        100,
+        120
+      ]
+    }
+  ],
+  "repositories": [
+    {
+      "repository_id": 100,
+      "full_name": "game-org/skyfall-recomp",
+      "owner": "game-org",
+      "description": "Recomp of Skyfall (fictional)",
+      "readme_excerpt": "# Skyfall\n",
+      "is_fork": true,
+      "parent_repository_id": 90,
+      "network_root_repository_id": 90,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": false,
+      "commits": [
+        {
+          "sha": "000000000000000000000000000000000000000a",
+          "committed_at": "2026-11-03T12:00:00Z",
+          "message": "fictional change"
+        },
+        {
+          "sha": "000000000000000000000000000000000000000e",
+          "committed_at": "2026-11-06T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    },
+    {
+      "repository_id": 120,
+      "full_name": "other-org/steady-port",
+      "owner": "other-org",
+      "description": "Fictional project",
+      "readme_excerpt": "# Fictional\n",
+      "is_fork": false,
+      "parent_repository_id": null,
+      "network_root_repository_id": null,
+      "archived": false,
+      "stars": 5,
+      "default_branch": "main",
+      "fetch_state": "ok",
+      "commits_complete": true,
+      "commits": [
+        {
+          "sha": "0000000000000000000000000000000000000032",
+          "committed_at": "2026-11-03T12:00:00Z",
+          "message": "fictional change"
+        }
+      ],
+      "releases": []
+    }
+  ]
+}
