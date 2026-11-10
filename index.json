@@ -1,10 +1,10 @@
 {
  "files": {
   "events/2026-11.jsonl": {
-   "bytes": 55222,
+   "bytes": 94316,
    "compressed": false,
-   "lines": 272,
-   "sha256": "c51f88c0d9f92d8360ab1f140e81d7a27328f0ec9de35d1e976b750992f9f22d"
+   "lines": 448,
+   "sha256": "1d8bba7794e3c9ba780a9e47f8c0b62efc89e5ddc9232feeec215f1567aa54e6"
   },
   "snapshots/2026-11.jsonl": {
    "bytes": 58364,
@@ -19,5 +19,5 @@
   "2026-11"
  ],
  "runs": 1,
- "total_bytes": 113586
+ "total_bytes": 152680
 }
