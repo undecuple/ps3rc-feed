@@ -328,12 +328,12 @@ README_PHRASES = (
     "An abnormal stop publishes nothing",
     "After the first run, review `feed.json` on the `feed-state` branch",
     "deploy it by starting the `pages` workflow by hand",
-    "may recur on the Actions token",
+    "observed, not documented",
 )
 
 
 def readme_problems(readme):
-    """The Scheduled refresh section names the publishing guard, the manual first deploy and what is not verified."""
+    """The Scheduled refresh section names the publishing guard, the manual first deploy and what is observed rather than documented."""
     start = readme.find("\n## Scheduled refresh\n")
     if start < 0:
         return ["README has no Scheduled refresh section"]
