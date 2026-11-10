@@ -5,10 +5,6 @@
     "ps3recomp in:description fork:true",
     "ps3recomp in:readme fork:true",
     {
-      "kind": "code",
-      "q": "filename:ps3recomp-LICENSE.txt"
-    },
-    {
       "q": "killzone in:name",
       "require_any": [
         "shadow fall",
