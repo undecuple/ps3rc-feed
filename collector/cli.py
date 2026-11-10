@@ -4,6 +4,7 @@
   collect --config PATH             print the request plan; with --recorded FIXTURE drive the collector offline
   collect --config PATH --live ...  read-only GET requests to api.github.com; writes one run file under data/
   export --runs FILE... --out-dir D apply run files under data/; write the site's feed.json and manifest.json to D
+                                    (--state-in / --state-out carry the store from one export to the next)
 
 Live runs need --max-requests (the effective budget is the smaller of the
 flag and the config's max_requests), GITHUB_TOKEN or --anonymous, --out
@@ -33,6 +34,9 @@ EXIT_PARTIAL = 3
 
 # write_run_file adds 22 characters (".<16 hex>.tmp") for its temp file; common file systems allow 255 bytes.
 MAX_OUT_NAME_BYTES = 200
+
+MIN_STALE_MINUTES = 1
+MAX_STALE_MINUTES = 100000
 
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 
@@ -168,7 +172,14 @@ def build_parser():
     exp = sub.add_parser("export", help="apply run files under data/ and write the site feed (feed.json, manifest.json); no network")
     exp.add_argument("--runs", nargs="+", required=True, help="run files (.json) under data/; applied in run_at order")
     exp.add_argument("--out-dir", required=True, help="directory under data/ that receives feed.json and manifest.json")
-    exp.add_argument("--overwrite", action="store_true", help="replace an existing feed.json or manifest.json")
+    exp.add_argument("--overwrite", action="store_true", help="replace an existing feed.json, manifest.json or --state-out file")
+    exp.add_argument("--state-in", help="saved state (.json under data/) to apply the runs on top of, instead of an empty store")
+    exp.add_argument("--state-out", help="write the resulting state here (.json under data/); may equal --state-in with --overwrite")
+    exp.add_argument(
+        "--stale-after-minutes",
+        type=int,
+        help="set the feed's stale_after_minutes (%d-%d); omitted from the feed when not given" % (MIN_STALE_MINUTES, MAX_STALE_MINUTES),
+    )
     return parser
 
 
@@ -274,8 +285,12 @@ def write_run_file(run, out_path, overwrite=False, flag="--out"):
     else at the target is refused. On any failure the temp file is removed.
     `flag` names the option in refusal messages.
     """
+    _write_bytes(json_bytes(run), out_path, overwrite, flag)
+
+
+def _write_bytes(data, out_path, overwrite=False, flag="--out"):
+    """write_run_file for bytes already in their canonical form; the same descriptor-based path and rules."""
     _require_posix()
-    data = json_bytes(run)
     root = os.path.normpath(REPO_ROOT)
     relative = os.path.relpath(os.path.normpath(out_path), root)
     if relative.startswith(os.pardir) or os.path.isabs(relative):
@@ -356,15 +371,20 @@ def resolve_run_inputs(values):
     return files
 
 
+def _check_path_text(value, flag):
+    """Control characters and over-long components are refused before the path is resolved."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise RefusedInput("refused: %s contains a control character" % flag)
+    for part in value.split(os.sep):
+        if len(part.encode("utf-8", errors="surrogateescape")) > MAX_OUT_NAME_BYTES:
+            raise RefusedInput("refused: %s has a component longer than %d bytes" % (flag, MAX_OUT_NAME_BYTES))
+
+
 def resolve_export_targets(out_dir, overwrite=False):
     """(feed path, manifest path) inside --out-dir, both checked with the --out rules before anything is read."""
     if not isinstance(out_dir, str) or not out_dir:
         raise RefusedInput("refused: --out-dir must name a directory under the data/ directory")
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in out_dir):
-        raise RefusedInput("refused: --out-dir contains a control character")
-    for part in out_dir.split(os.sep):
-        if len(part.encode("utf-8", errors="surrogateescape")) > MAX_OUT_NAME_BYTES:
-            raise RefusedInput("refused: --out-dir has a component longer than %d bytes" % MAX_OUT_NAME_BYTES)
+    _check_path_text(out_dir, "--out-dir")
     targets = []
     for name in (export.FEED_NAME, export.MANIFEST_NAME):
         try:
@@ -374,21 +394,94 @@ def resolve_export_targets(out_dir, overwrite=False):
     return targets
 
 
-def run_export(args):
-    """Apply the run files to an empty store, then write feed.json and manifest.json. Never touches the network.
+def resolve_state_input(value):
+    """--state-in: a regular .json file under data/, with the same path rules as --runs."""
+    _check_path_text(value, "--state-in")
+    real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory")
+    if not (stat.S_ISREG(os.lstat(real).st_mode) and real.endswith(".json")):
+        raise RefusedInput("refused: --state-in takes a .json state file under the data/ directory")
+    return real
 
-    The runs are applied oldest first (sorted by run_at), exactly as dry-run
-    applies them. Two run files with the same run_at are refused before
-    anything is written, so the same files in any order give the same bytes.
-    The feed is written before the manifest, so a page that sees the new
-    manifest version finds the matching feed. A manifest that appears
-    between the pre-check and its write can leave a new feed.json without a
-    manifest; rerunning with --overwrite repairs it.
+
+def resolve_state_output(value, overwrite=False):
+    """--state-out: the --out rules (under data/, .json, no link, existing file only with --overwrite)."""
+    if not isinstance(value, str) or not value:
+        raise RefusedInput("refused: --state-out must name a .json file under the data/ directory")
+    _check_path_text(value, "--state-out")
+    return resolve_out_path(value, overwrite=overwrite, flag="--state-out")
+
+
+def _check_stale_minutes(value):
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or not MIN_STALE_MINUTES <= value <= MAX_STALE_MINUTES:
+        raise RefusedInput("refused: --stale-after-minutes must be between %d and %d" % (MIN_STALE_MINUTES, MAX_STALE_MINUTES))
+    return value
+
+
+def load_export_state(path):
+    """store.load_state for --state-in, with the path in the message relative to the repository (exit 1 on failure)."""
+    rel = os.path.relpath(path, REPO_ROOT)
+    try:
+        return store.load_state(path)
+    except schema.SchemaError as exc:
+        detail = str(exc).replace(path + ": ", "").replace(path, rel)
+        raise schema.SchemaError("--state-in %s is not a usable state: %s" % (rel, detail)) from None
+
+
+def run_export(args):
+    """Apply the run files to a store, then write the state, feed.json and manifest.json. Never touches the network.
+
+    The store is empty, or the state saved by an earlier export when
+    --state-in is given. The runs are applied oldest first (sorted by
+    run_at), exactly as dry-run applies them. Two run files with the same
+    run_at are refused, so the same files in any order give the same bytes,
+    and so is a run whose run_at is not newer than the loaded state's
+    last_run_at (it is older than, or already part of, that state).
+
+    Every path is checked before anything is read: --out-dir targets,
+    --state-out, --runs, --state-in, and that no output is also an input
+    (--state-in may equal --state-out only with --overwrite; the state is
+    read in full before the atomic replace). Then everything is read,
+    validated and applied, and all output bytes are built before the first
+    write, so a refusal or an invalid input leaves every file untouched.
+
+    Write order: state, then feed, then manifest. Each write is atomic (temp
+    file, then rename or link), so the only partial outcome is a failure
+    between two writes. The state goes first because it is the record of
+    which runs have been applied and the feed is derived from it: if a later
+    write fails, the published feed and manifest are still the previous
+    consistent pair, the next export from the saved state publishes a feed
+    that includes this run, and repeating this run is refused (exit 2)
+    instead of being applied twice. Writing the state last would instead
+    let a failure after the feed leave a published feed that the saved
+    state does not contain; the next run would then be applied without it
+    and silently rewrite what the page already showed. The feed is written
+    before the manifest, so a page that sees the new manifest version finds
+    the matching feed. A manifest that appears between the pre-check and its
+    write can leave a new feed.json without a manifest; rerunning with
+    --overwrite repairs it (with --state-in equal to --state-out, rerun from
+    a copy of the previous state, or wait for the next run).
     """
     feed_path, manifest_path = resolve_export_targets(args.out_dir, overwrite=args.overwrite)
+    state_out = resolve_state_output(args.state_out, overwrite=args.overwrite) if args.state_out is not None else None
+    stale_minutes = _check_stale_minutes(args.stale_after_minutes)
     files = resolve_run_inputs(args.runs)
-    if os.path.realpath(feed_path) in files or os.path.realpath(manifest_path) in files:
+    state_in = resolve_state_input(args.state_in) if args.state_in is not None else None
+    outputs = [os.path.realpath(feed_path), os.path.realpath(manifest_path)]
+    if any(path in files for path in outputs):
         raise RefusedInput("refused: --out-dir would replace one of the --runs files")
+    if state_out is not None:
+        if os.path.realpath(state_out) in files:
+            raise RefusedInput("refused: --state-out would replace one of the --runs files")
+        if os.path.realpath(state_out) in outputs:
+            raise RefusedInput("refused: --state-out is the same file as a --out-dir output")
+    if state_in is not None:
+        if state_in in files:
+            raise RefusedInput("refused: --state-in is also named in --runs")
+        if state_in in outputs:
+            raise RefusedInput("refused: --out-dir would replace the --state-in file")
+    state = load_export_state(state_in) if state_in is not None else store.empty_state()
     loaded = sorted(((schema.load_run_file(path), path) for path in files), key=lambda item: item[0]["run_at"])
     for (earlier, earlier_path), (later, later_path) in zip(loaded, loaded[1:]):
         if earlier["run_at"] == later["run_at"]:
@@ -396,19 +489,34 @@ def run_export(args):
                 "refused: --runs %s and %s have the same run_at (%s); the order to apply them is undefined"
                 % (os.path.relpath(earlier_path, REPO_ROOT), os.path.relpath(later_path, REPO_ROOT), earlier["run_at"])
             )
+    oldest, oldest_path = loaded[0]
+    if state["last_run_at"] is not None and oldest["run_at"] <= state["last_run_at"]:
+        raise RefusedInput(
+            "refused: --runs %s has run_at %s, which is not newer than the --state-in last run (%s); "
+            "it is already applied or older, and runs are only applied forwards"
+            % (os.path.relpath(oldest_path, REPO_ROOT), oldest["run_at"], state["last_run_at"])
+        )
     runs = [run for run, _ in loaded]
-    state = store.empty_state()
     config = events.Config()
     for run in runs:
         events.apply_run(state, run, config)
-    feed = export.build_feed(state)
+    state_bytes = None
+    if state_out is not None:
+        schema.validate_state(state)
+        state_bytes = store.dumps(state).encode("utf-8")
+    feed = export.build_feed(state, stale_after_minutes=stale_minutes)
     feed_bytes = json_bytes(feed)
     manifest = export.build_manifest(feed, feed_bytes)
+    written = []
+    if state_out is not None:
+        _write_bytes(state_bytes, state_out, overwrite=args.overwrite, flag="--state-out")
+        written.append(os.path.relpath(state_out, REPO_ROOT))
     write_run_file(feed, feed_path, overwrite=args.overwrite, flag="--out-dir")
     write_run_file(manifest, manifest_path, overwrite=args.overwrite, flag="--out-dir")
+    written += [os.path.relpath(feed_path, REPO_ROOT), os.path.relpath(manifest_path, REPO_ROOT)]
     _print(
         {
-            "written": [os.path.relpath(feed_path, REPO_ROOT), os.path.relpath(manifest_path, REPO_ROOT)],
+            "written": written,
             "runs": len(runs),
             "generated_at": feed["generated_at"],
             "version": manifest["version"],

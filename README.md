@@ -38,10 +38,15 @@ A Python standard-library collector in `collector/`, developed and tested on Pyt
   only links are `https://github.com/owner/name` repository URLs, unknown values are `null`, and the newest 500
   events are kept. The output is deterministic: the same run files in any order give the same bytes (two run files
   with the same `run_at` are refused), `generated_at` is the newest run's `run_at`, and the manifest `version` is the
-  first 16 hex digits of the feed's SHA-256.
+  first 16 hex digits of the feed's SHA-256. The feed's `collection` object describes the newest run (`complete`,
+  `stopped`, `not_fetched`, `error_count`, `last_run_at`), and `--stale-after-minutes N` adds `stale_after_minutes`
+  for the page's stale check.
+- **State between exports:** `--state-out` saves the store after the runs are applied, and `--state-in` starts the
+  next export from it, so a daily job applies one new run on top of the previous state. A saved state plus the next
+  run gives the same feed bytes as both runs from scratch. A run that is not newer than the state's last run is
+  refused.
 
-Not built yet: a persisted store between runs (export replays the run files each time), publishing the exported feed
-to the site, and the RSS and Discord feeds.
+Not built yet: publishing the exported feed to the site, and the RSS and Discord feeds.
 
 ## Using it
 
@@ -57,12 +62,20 @@ to the site, and the RSS and Discord feeds.
     # site feed from run files, no network
     python3 -B -m collector export --runs data/run-001.json data/run-002.json --out-dir data/site
 
+    # the next day: apply one new run on top of the saved state
+    python3 -B -m collector export --runs data/run-003.json --out-dir data/site --overwrite \
+        --state-in data/state.json --state-out data/state.json --stale-after-minutes 1500
+
 A live run needs `--max-requests` and `--out` under `data/` (which git ignores), and either `GITHUB_TOKEN` (a token
 with no permissions is enough for public data) or `--anonymous`. It refuses the placeholder example config. Exit
 codes: 0 complete, 3 partial (for example stopped by the budget or a rate limit), 1 error, 2 refused. The live write
 path uses POSIX file operations, so it targets Linux and macOS. `export` follows the same rules: inputs and
 `--out-dir` under `data/`, no symbolic links, existing files replaced only with `--overwrite`; it exits 0 when written,
-1 on an invalid run file, 2 when refused. `python3 -m collector` and `python3 -m collector.cli` are the same command.
+1 on an invalid run file or state file, 2 when refused. `--state-in` and `--state-out` follow the same rules and may
+name the same file only with `--overwrite`. Every check runs before anything is read, and every output is built before
+the first write. The state is written first, then `feed.json`, then `manifest.json`: if a later write fails, the
+page keeps the previous feed, the next export from the saved state publishes this run, and repeating this run is
+refused instead of being applied twice. `python3 -m collector` and `python3 -m collector.cli` are the same command.
 
 `config/sources.example.json` holds fictional placeholders only. The real roots and search queries are not committed.
 

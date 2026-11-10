@@ -247,7 +247,8 @@ class ExportOutput(ExportTestCase):
         code, out, err = self.export([self.put("empty.json", run)])
         self.assertEqual(code, 0, err)
         feed, manifest, _, _ = self.read()
-        self.assertEqual(feed, {"generated_at": run["run_at"], "repos": [], "events": []})
+        collection = {"complete": True, "stopped": None, "not_fetched": 0, "error_count": 0, "last_run_at": run["run_at"]}
+        self.assertEqual(feed, {"generated_at": run["run_at"], "collection": collection, "repos": [], "events": []})
         self.assertTrue(valid_feed(feed))
         self.assertEqual(manifest["generated_at"], run["run_at"])
 
@@ -542,3 +543,256 @@ class ExportRefusals(ExportTestCase):
         proc = subprocess.run([sys.executable, "-B", "-m", "collector", "export", "--runs", "/etc/hosts", "--out-dir", "data/never-written"], cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 2)
         self.assertFalse(os.path.exists(os.path.join(REPO_ROOT, "data", "never-written")))
+
+
+def _baseline_and_later():
+    """A baseline run, then a later run that adds a new repository and a new fork of the root."""
+    first, second = load_run("new_activity", 1), load_run("new_activity", 2)
+    template = second["repositories"][0]
+    added = copy.deepcopy(template)
+    added.update(repository_id=120, full_name="other-org/new-recomp", owner="other-org", description="Another fictional project")
+    fork = copy.deepcopy(template)
+    fork.update(
+        repository_id=130, full_name="fork-z/ps3recomp-example", owner="fork-z", description="Fictional fork",
+        is_fork=True, parent_repository_id=90, network_root_repository_id=90,
+    )
+    second["repositories"] += [added, fork]
+    second["searches"][0]["repository_ids"] = sorted(set(second["searches"][0]["repository_ids"]) | {120})
+    second["roots"][0]["found_repository_ids"] = sorted(set(second["roots"][0].get("found_repository_ids") or []) | {100, 130})
+    return first, second
+
+
+def _partial(run, run_at):
+    partial = copy.deepcopy(run)
+    partial["run_at"] = run_at
+    partial["collection_report"] = {"complete": False, "stopped": "budget", "error_count": 2, "dropped_items": 0, "not_fetched": 3, "requests_made": 10}
+    return partial
+
+
+class ExportState(ExportTestCase):
+    def setUp(self):
+        super().setUp()
+        first, second = _baseline_and_later()
+        self.first, self.second = self.put("1.json", first), self.put("2.json", second)
+
+    def state_bytes(self, name):
+        with open(os.path.join(self.data, name), "rb") as fh:
+            return fh.read()
+
+    def test_saved_state_plus_next_run_equals_both_runs_from_scratch(self):
+        from collector import store
+
+        code, out, err = self.export([self.first], "data/a", ["--state-out", "data/state.json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["written"], ["data/state.json", "data/a/feed.json", "data/a/manifest.json"])
+        code, out, err = self.export([self.second], "data/b", ["--state-in", "data/state.json", "--state-out", "data/state2.json"])
+        self.assertEqual(code, 0, err)
+        code, out, err = self.export([self.first, self.second], "data/c", ["--state-out", "data/scratch-state.json"])
+        self.assertEqual(code, 0, err)
+        b, c = self.read("data/b"), self.read("data/c")
+        self.assertEqual(b[2], c[2])
+        self.assertEqual(b[3], c[3])
+        self.assertEqual(self.state_bytes("state2.json"), self.state_bytes("scratch-state.json"))
+        # The state file is the store's canonical form and loads back as it is.
+        loaded = store.load_state(os.path.join(self.data, "state2.json"))
+        self.assertEqual(store.dumps(loaded).encode("utf-8"), self.state_bytes("state2.json"))
+        # Events across the two exports: the new repository and the new fork are announced, the baseline is quiet.
+        self.assertSiteShape(b[0])
+        found = {(e["type"], e["repo_id"]) for e in b[0]["events"]}
+        self.assertIn(("repository_discovered", "r120"), found)
+        self.assertIn(("repository_discovered", "r130"), found)
+        self.assertIn(("fork_discovered", "r130"), found)
+        self.assertEqual(self.read("data/a")[0]["events"], [])
+        # --state-in equal to --state-out with --overwrite: the usual atomic replace, same result.
+        code, out, err = self.export([self.second], "data/d", ["--state-in", "data/state.json", "--state-out", "data/state.json", "--overwrite"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("data/d")[2], c[2])
+        self.assertEqual(self.state_bytes("state.json"), self.state_bytes("scratch-state.json"))
+        self.assertEqual(sorted(n for n in os.listdir(self.data) if n.endswith(".tmp")), [])
+
+    def test_write_order_is_state_feed_manifest(self):
+        from collector import cli
+
+        real_write = cli._write_bytes
+        order = []
+
+        def recording(data, out_path, *args, **kwargs):
+            order.append(os.path.basename(out_path))
+            return real_write(data, out_path, *args, **kwargs)
+
+        with unittest.mock.patch.object(cli, "_write_bytes", recording):
+            code, out, err = self.export([self.first], "data/site", ["--state-out", "data/state.json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(order, ["state.json", "feed.json", "manifest.json"])
+
+    def test_failed_feed_write_keeps_the_state_and_the_next_export_catches_up(self):
+        from collector import cli
+
+        self.assertEqual(self.export([self.first], "data/site", ["--state-out", "data/state.json"])[0], 0)
+        old_feed = self.read()[2]
+        real_write = cli.write_run_file
+
+        def failing(document, out_path, *args, **kwargs):
+            if os.path.basename(out_path) == "feed.json":
+                raise OSError(28, "No space left on device")
+            return real_write(document, out_path, *args, **kwargs)
+
+        argv = ["--state-in", "data/state.json", "--state-out", "data/state.json", "--overwrite"]
+        with unittest.mock.patch.object(cli, "write_run_file", failing):
+            code, out, err = self.export([self.second], "data/site", argv)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read()[2], old_feed)  # the published pair is the previous one
+        # The state already holds the run: repeating it is refused, not applied twice.
+        code, out, err = self.export([self.second], "data/site", argv)
+        self.assertEqual(code, 2)
+        self.assertIn("not newer than the --state-in last run", err)
+        third = load_run("new_activity", 3)
+        third["run_at"] = "2026-11-09T00:00:00Z"
+        code, out, err = self.export([self.put("3.json", third)], "data/site", argv)
+        self.assertEqual(code, 0, err)
+        found = {(e["type"], e["repo_id"]) for e in self.read()[0]["events"]}
+        self.assertIn(("fork_discovered", "r130"), found)
+
+    def assertRefused(self, argv_runs, out_dir, needle, extra=(), code=2):
+        before = _snapshot(self.tmp.name)
+        got, out, err = self.export(argv_runs, out_dir, extra)
+        self.assertEqual(got, code, (extra, err))
+        self.assertIn(needle, err)
+        self.assertEqual(out, "")
+        self.assertNotIn(self.tmp.name, err)
+        self.assertEqual(_snapshot(self.tmp.name), before)
+        return err
+
+    def test_runs_not_newer_than_the_state_are_refused(self):
+        self.assertEqual(self.export([self.second], "data/site", ["--state-out", "data/state.json"])[0], 0)
+        older = ["--state-in", "data/state.json", "--state-out", "data/next.json"]
+        err = self.assertRefused([self.first], "data/next", "not newer than the --state-in last run (2026-11-06T12:00:00Z)", older)
+        self.assertIn("data/1.json has run_at 2026-11-05T00:00:00Z", err)
+        self.assertRefused([self.second], "data/next", "not newer than the --state-in last run", older)
+        # One old run among newer ones is refused too.
+        third = self.put("3.json", load_run("new_activity", 3))
+        self.assertRefused([third, self.first], "data/next", "data/1.json has run_at", older)
+
+    def test_unusable_state_files_are_errors(self):
+        from collector import store
+
+        def put_state(name, content):
+            with open(os.path.join(self.data, name), "w", encoding="utf-8") as fh:
+                fh.write(content)
+            return "data/" + name
+
+        good = store.empty_state()
+        old = dict(good, schema_version=1)
+        missing = copy.deepcopy(good)
+        del missing["collection"]["last_run"]
+        wrong_type = dict(good, last_run_at=5)
+        for name, content, needle in (
+            ("garbage.json", "{not json", "not valid JSON"),
+            ("list.json", "[]", "schema_version None is not supported"),
+            ("old.json", json.dumps(old), "schema_version 1 is not supported"),
+            ("future.json", json.dumps(dict(good, schema_version=99)), "schema_version 99 is not supported"),
+            ("missing.json", json.dumps(missing), "last_run"),
+            ("wrong.json", json.dumps(wrong_type), "last_run_at"),
+            ("dup.json", '{"schema_version": 2, "schema_version": 2}', "duplicate"),
+        ):
+            with self.subTest(name=name):
+                path = put_state(name, content)
+                err = self.assertRefused([self.first], "data/site", needle, ["--state-in", path, "--state-out", "data/out.json"], code=1)
+                self.assertIn("--state-in data/%s is not a usable state" % name, err)
+
+    def test_state_path_refusals(self):
+        self.assertEqual(self.export([self.first], "data/site", ["--state-out", "data/state.json"])[0], 0)
+        elsewhere = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(elsewhere)
+        os.symlink(os.path.join(self.data, "state.json"), os.path.join(self.data, "link.json"))
+        os.symlink(elsewhere, os.path.join(self.data, "linkdir"))
+        for extra, needle in (
+            (["--state-in", "data/absent.json"], "does not exist"),
+            (["--state-in", "data/link.json"], "symbolic links are not accepted"),
+            (["--state-in", "data"], ".json state file"),
+            (["--state-in", os.path.join(self.tmp.name, "x.json")], "outside the data/ directory"),
+            (["--state-in", "https://example.invalid/state.json"], "URLs"),
+            (["--state-in", self.second], "--state-in is also named in --runs"),
+            (["--state-out", "data/link.json", "--overwrite"], "--state-out path contains a symbolic link"),
+            (["--state-out", "data/linkdir/state.json"], "--state-out path contains a symbolic link"),
+            (["--state-out", "data/state.json"], "--state-out exists; pass --overwrite to replace it"),
+            (["--state-in", "data/state.json", "--state-out", "data/state.json"], "--state-out exists; pass --overwrite"),
+            (["--state-out", self.second], "--state-out exists; pass --overwrite"),
+            (["--state-out", self.second, "--overwrite"], "--state-out would replace one of the --runs files"),
+            (["--state-out", "data/next/feed.json", "--overwrite"], "--state-out is the same file as a --out-dir output"),
+            (["--state-out", "state.json"], "--state-out must lie under the data/ directory"),
+            (["--state-out", "data/state.txt"], "--state-out must be a .json file"),
+            (["--state-out", "data/" + "s" * 250 + ".json"], "--state-out has a component longer than 200 bytes"),
+            (["--state-out", "data/a\nb.json"], "--state-out contains a control character"),
+        ):
+            with self.subTest(extra=extra):
+                self.assertRefused([self.second], "data/next", needle, extra)
+        self.assertRefused([self.second], "data/site", "--out-dir would replace the --state-in file", ["--state-in", "data/site/feed.json", "--overwrite"])
+        self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_collection_fields_for_complete_and_partial_runs(self):
+        code, out, err = self.export([self.first], "data/a", ["--state-out", "data/state.json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            self.read("data/a")[0]["collection"],
+            {"complete": True, "stopped": None, "not_fetched": 0, "error_count": 0, "last_run_at": "2026-11-05T00:00:00Z"},
+        )
+        partial = self.put("p.json", _partial(load_run("new_activity", 2), "2026-11-06T00:00:00Z"))
+        code, out, err = self.export([partial], "data/b", ["--state-in", "data/state.json"])
+        self.assertEqual(code, 0, err)
+        feed = self.read("data/b")[0]
+        self.assertEqual(
+            feed["collection"],
+            {"complete": False, "stopped": "budget", "not_fetched": 3, "error_count": 2, "last_run_at": "2026-11-06T00:00:00Z"},
+        )
+        self.assertEqual(feed["collection"]["last_run_at"], feed["generated_at"])
+        self.assertSiteShape(feed)
+
+    def test_stale_after_minutes(self):
+        code, out, err = self.export([self.first], "data/none")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("stale_after_minutes", self.read("data/none")[0])
+        for value in (1, 100000, 90):
+            with self.subTest(value=value):
+                out_dir = "data/ok%d" % value
+                code, out, err = self.export([self.first], out_dir, ["--stale-after-minutes", str(value)])
+                self.assertEqual(code, 0, err)
+                feed, manifest, feed_bytes, _ = self.read(out_dir)
+                self.assertEqual(feed["stale_after_minutes"], value)
+                self.assertEqual(manifest["version"], hashlib.sha256(feed_bytes).hexdigest()[:16])
+        for bad in ("0", "-5", "100001", "10" * 20):
+            with self.subTest(bad=bad):
+                self.assertRefused([self.first], "data/bad", "--stale-after-minutes must be between 1 and 100000", ["--stale-after-minutes", bad])
+        for bad in ("abc", "1.5", ""):
+            with self.subTest(bad=bad):
+                self.assertRefused([self.first], "data/bad", "", ["--stale-after-minutes", bad])
+        # Checked before anything is read: an invalid run file is not reached.
+        broken = self.put("broken.json", {"unexpected": True})
+        self.assertRefused([broken], "data/bad", "--stale-after-minutes must be between", ["--stale-after-minutes", "0"])
+
+    def test_state_bytes_identical_across_hash_seeds(self):
+        script = (
+            "import sys, unittest.mock\n"
+            "sys.path.insert(0, %r)\n"
+            "from collector import cli\n"
+            "repo = sys.argv[1]\n"
+            "with unittest.mock.patch.object(cli, 'REPO_ROOT', repo), unittest.mock.patch.object(cli, 'DATA_ROOT', repo + '/data'):\n"
+            "    sys.exit(cli.main(sys.argv[2:]))\n" % REPO_ROOT
+        )
+        outputs = []
+        for i, seed in enumerate(("0", "1", "4242", "random")):
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            steps = (
+                [self.first, "--out-dir", "data/s%d/a" % i, "--state-out", "data/s%d/state1.json" % i],
+                [self.second, "--out-dir", "data/s%d/b" % i, "--state-in", "data/s%d/state1.json" % i, "--state-out", "data/s%d/state2.json" % i],
+            )
+            for step in steps:
+                proc = subprocess.run(
+                    [sys.executable, "-B", "-c", script, self.repo, "export", "--runs"] + step,
+                    cwd=self.tmp.name, env=env, capture_output=True, text=True, timeout=120,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+            outputs.append(tuple(self.state_bytes("s%d/state%d.json" % (i, n)) for n in (1, 2)) + (self.read("data/s%d/b" % i)[2],))
+        for other in outputs[1:]:
+            self.assertEqual(other, outputs[0])
+        self.assertIn(b'"fork_discovered_done": true', outputs[0][1])
