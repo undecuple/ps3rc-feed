@@ -21,6 +21,7 @@ RUN_TIMESTAMP_KEYS = {
     "last_attempted_refresh_at",
     "last_successful_refresh_at",
     "last_seen_at",
+    "last_complete_at",
 }
 
 

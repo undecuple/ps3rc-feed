@@ -6,7 +6,11 @@ import tempfile
 
 from . import schema
 
-SCHEMA_VERSION = 1
+# 2: step 2 added fork relationships, comparisons and discovery records to
+# every observation. A version 1 store is refused; rebuild it from the run
+# files (the collector is deterministic, so a replay gives the same ids).
+SCHEMA_VERSION = 2
+SUPPORTED_VERSIONS = (2,)
 
 
 def empty_state():
@@ -23,6 +27,8 @@ def empty_state():
             "incomplete": False,
             "incomplete_searches": [],
             "incomplete_roots": [],
+            "pending_repository_ids": [],
+            "rejected_fields": [],
         },
     }
 
@@ -66,9 +72,13 @@ def save_state(state, path):
 
 def load_state(path):
     state = schema.read_json(path)
+    version = state.get("schema_version") if isinstance(state, dict) else None
+    if version not in SUPPORTED_VERSIONS:
+        raise schema.SchemaError(
+            "%s: state schema_version %r is not supported (this collector writes version %d); "
+            "rebuild the store by replaying the run files" % (path, version, SCHEMA_VERSION)
+        )
     schema.validate_state(state)
-    if state["schema_version"] != SCHEMA_VERSION:
-        raise schema.SchemaError("%s: unsupported schema_version %r" % (path, state["schema_version"]))
     return state
 
 
