@@ -450,8 +450,8 @@ class L8WritePath(CollectorTestCase):
             real_check = cli._check_target
             seen = []
 
-            def check_then_race(name, dir_fd, overwrite):
-                real_check(name, dir_fd, overwrite)
+            def check_then_race(name, dir_fd, overwrite, flag="--out"):
+                real_check(name, dir_fd, overwrite, flag)
                 seen.append(name)
                 if len(seen) == 2:
                     # Another writer creates the target between the final check and the publish step.

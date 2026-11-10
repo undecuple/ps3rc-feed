@@ -187,7 +187,7 @@ class NetworkImportBoundary(CollectorTestCase):
     def test_only_github_py_imports_network_modules(self):
         """cli.py and collect.py reach the network only through github.py."""
         forbidden = {"http", "http.client", "urllib", "urllib.request", "socket", "ssl"}
-        for name in ("cli.py", "collect.py", "events.py", "catalog.py", "schema.py", "store.py", "forks.py", "model.py"):
+        for name in ("cli.py", "collect.py", "events.py", "export.py", "catalog.py", "schema.py", "store.py", "forks.py", "model.py"):
             path = os.path.join(REPO_ROOT, "collector", name)
             with open(path, "r", encoding="utf-8") as fh:
                 tree = ast.parse(fh.read(), filename=name)

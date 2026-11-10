@@ -371,7 +371,7 @@ class D_CodePathFixes(CollectorTestCase):
     def test_package_exports_match_the_modules(self):
         import collector
 
-        modules = sorted(f[:-3] for f in os.listdir(os.path.join(REPO_ROOT, "collector")) if f.endswith(".py") and f != "__init__.py")
+        modules = sorted(f[:-3] for f in os.listdir(os.path.join(REPO_ROOT, "collector")) if f.endswith(".py") and f not in ("__init__.py", "__main__.py"))
         self.assertEqual(sorted(collector.__all__), modules)
         for name in modules:
             importlib.import_module("collector." + name)
