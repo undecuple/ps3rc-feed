@@ -81,7 +81,7 @@ def build_entry(state, obs):
         "game_key": obs["game"]["key"],
         "game_inferred": True,
         "game_verified": False,
-        "game_inherited": obs["game"]["basis"] == "inherited_from_parent",
+        "game_inherited": obs["game"]["basis"] in ("inherited_from_parent", "inherited_unverified_copy"),
         "game_confidence": obs["game"]["confidence"],
         "game_basis": obs["game"]["basis"],
         "category": obs["category"],
@@ -94,6 +94,7 @@ def build_entry(state, obs):
         "ahead": obs["comparison"]["ahead"],
         "behind": obs["comparison"]["behind"],
         "comparison_state": obs["comparison"]["state"],
+        "comparison_stale": obs["comparison_status"]["stale"],
         # The three relationships, kept apart (spec 03).
         "ancestry": {
             "is_fork": obs["is_fork"],
@@ -102,7 +103,9 @@ def build_entry(state, obs):
             "network_root_repository_id": obs["network_root_repository_id"],
             "root": root["full_name"] if root else None,
             "state": obs["ancestry_state"],
+            "fork_discovered": obs["fork_discovered_done"],
         },
+        "ancestry_history": [dict(h) for h in obs["ancestry_history"]],
         "game_association": {
             "key": obs["game"]["key"],
             "title": text.escape_text(obs["game"]["title"], text.MAX_TITLE),
@@ -128,6 +131,11 @@ def build_entry(state, obs):
             "behind": obs["comparison"]["behind"],
             "state": obs["comparison"]["state"],
             "collected_at": obs["comparison"]["collected_at"],
+            "future_dated": obs["comparison"]["future_dated"],
+            "stale": obs["comparison_status"]["stale"],
+            "last_reported_state": obs["comparison_status"]["last_reported_state"],
+            "last_reported_at": obs["comparison_status"]["last_reported_at"],
+            "history_entries": len(obs["comparison_history"]),
         },
         "discovery_roots": list(obs["discovery_roots"]),
         "discovery_queries": [text.escape_text(q) for q in obs["discovery_queries"]],
@@ -193,5 +201,11 @@ def collection_status(state):
             for key, r in sorted(col["roots"].items())
         },
         "pending_repository_ids": list(col["pending_repository_ids"]),
-        "unresolved_ancestry": sorted(o["repository_id"] for o in repos if o["ancestry_state"] in ("unresolved", "inconsistent")),
+        "unresolved_ancestry": sorted(
+            o["repository_id"] for o in repos if o["ancestry_state"] in ("unresolved", "inconsistent", "depth_exceeded")
+        ),
+        "rejected_fields": [
+            {"path": text.escape_text(r["path"], 128), "reason": r["reason"]} for r in col["rejected_fields"]
+        ],
+        "comparison_stale": sorted(o["repository_id"] for o in repos if o["comparison_status"]["stale"]),
     }

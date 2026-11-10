@@ -8,7 +8,7 @@ are built in memory with the same builders as the hardening tests.
 import copy
 import time
 
-from helpers import CollectorTestCase, load_run, run_runs
+from helpers import CollectorTestCase, canonical, load_run, run_runs
 from test_hardening import T, failing, repo, run, sha
 
 FRAME = "frame-org/ps3recomp-example"
@@ -162,11 +162,11 @@ class T30NestedAncestry(CollectorTestCase):
         for rid in (500, 501):
             self.assertNotEqual(entries[rid]["parent_repository_id"], 90)
             self.assertNotEqual(entries[rid]["root_repository_id"], 90)
-        # Later, as a discovery: the fork event says the parent is not resolved.
+        # Later, as a discovery: a fork without a parent is announced as a repository only;
+        # fork_discovered waits until a parent is known (see test_forks_hardening G5).
         state, events = self.assertDeterministic([prefix_run(), run(T(5), [framework_root(), unresolved], roots=[dict(ROOT90, found_repository_ids=[500])])])
-        forkd = [e for e in events[1] if e["type"] == "fork_discovered"][0]
-        self.assertEqual(forkd["summary"], "fork first seen; parent not resolved (unresolved)")
-        self.assertIsNone(forkd["details"]["parent"])
+        self.assertEqual([e["type"] for e in events[1]], ["repository_discovered"])
+        self.assertIs(state["repositories"]["500"]["fork_discovered_done"], False)
 
 
 class T31IncompleteScan(CollectorTestCase):
@@ -298,10 +298,12 @@ class T33InheritedAssociation(CollectorTestCase):
         ])
         self.assertEqual(state["repositories"]["400"]["game"]["key"], "renamed-title")
         changes = [e for e in events[1] if e["type"] == "game_association_changed"]
-        self.assertEqual(sorted(e["repository_id"] for e in changes), [100, 400])
-        child_change = [e for e in changes if e["repository_id"] == 400][0]
-        self.assertEqual(child_change["summary"], "inferred game now inherited from parent (automated, unverified)")
-        self.assertEqual(child_change["details"]["inherited_from"], 100)
+        # The parent's own change, plus one aggregated event for everything that inherited it.
+        self.assertEqual(sorted(e["event_id"] for e in changes), ["repo-100:game_association:20261106000000", "repo-100:game_association_inherited:20261106000000"])
+        aggregate = [e for e in changes if e["details"].get("cause") == "inherited"][0]
+        self.assertEqual(aggregate["details"]["affected_repository_ids"], [400])
+        self.assertEqual(aggregate["details"]["affected_count"], 1)
+        self.assertEqual(aggregate["summary"], "inherited game association changed for 1 repository (automated, unverified)")
 
 
 class T34ThreeRelationships(CollectorTestCase):
@@ -310,7 +312,7 @@ class T34ThreeRelationships(CollectorTestCase):
 
         state, _ = self.assertScenarioDeterministic("forks_two_roots", upto=1)
         entry = [c for c in catalog.build_catalog(state) if c["id"] == 301][0]
-        self.assertEqual(set(entry["ancestry"]), {"is_fork", "parent_repository_id", "parent", "network_root_repository_id", "root", "state"})
+        self.assertEqual(set(entry["ancestry"]), {"is_fork", "parent_repository_id", "parent", "network_root_repository_id", "root", "state", "fork_discovered"})
         self.assertEqual(set(entry["game_association"]), {"key", "title", "basis", "inherited_from", "confidence", "inferred", "verified"})
         self.assertEqual(set(entry["toolkit_detection"]), {"name", "basis", "inherited_from", "confidence"})
         self.assertEqual(entry["ancestry"]["parent_repository_id"], 100)
@@ -362,7 +364,10 @@ class T35ComparisonUnavailable(CollectorTestCase):
         self.assertEqual((entry["ahead"], entry["behind"], entry["comparison_state"]), (6, 2, "complete"))
         mid, _ = run_runs(runs[:5])
         mid_entry = [c for c in catalog.build_catalog(mid) if c["id"] == 100][0]
-        self.assertEqual((mid_entry["ahead"], mid_entry["behind"], mid_entry["comparison_state"]), (None, None, "unavailable"))
+        # The last comparable snapshot stays visible, marked stale, while the source reports unavailable.
+        self.assertEqual((mid_entry["ahead"], mid_entry["behind"], mid_entry["comparison_state"]), (6, 2, "complete"))
+        self.assertIs(mid_entry["comparison_stale"], True)
+        self.assertIs(entry["comparison_stale"], False)
         with self.assertRaises(schema.SchemaError):
             schema.validate_run(child({"state": "unavailable", "ahead": 0, "behind": 0}, T(11)))
         with self.assertRaises(schema.SchemaError):
@@ -373,21 +378,27 @@ class T35ComparisonUnavailable(CollectorTestCase):
         state, events = self.assertDeterministic([child(comparison(5, 2, at=T(6)), T(6)), child(comparison(7, 2, state="partial", at=T(7)), T(7))])
         self.assertIn("(partial comparison)", events[1][0]["summary"])
 
-    def test_hostile_ref_names_are_escaped_everywhere(self):
+    def test_hostile_ref_names_are_dropped_at_load_and_valid_refs_escaped(self):
         from collector import catalog
 
-        cmp = comparison(1, 0, base_ref="<script>alert(1)</script>", head_ref="@everyone‮")
+        # Refs outside the git character set never reach the store (test_forks_hardening G8);
+        # refs inside it are still passed through the renderer escape.
+        cmp = comparison(1, 0, base_ref="feature/x+y", head_ref="release-1.0")
         runs = [
             run(T(5), [framework_root(), repo(rid=100, name="game-org/skyfall-recomp", is_fork=True, parent_repository_id=90, network_root_repository_id=90, comparison=cmp)]),
-            run(T(6), [framework_root(), repo(rid=100, name="game-org/skyfall-recomp", is_fork=True, parent_repository_id=90, network_root_repository_id=90, comparison=dict(cmp, ahead=2))]),
+            run(T(6), [framework_root(), repo(rid=100, name="game-org/skyfall-recomp", is_fork=True, parent_repository_id=90, network_root_repository_id=90, comparison=dict(cmp, ahead=2, collected_at=T(6)))]),
         ]
         state, events = self.assertDeterministic(runs)
         details = events[1][0]["details"]
-        self.assertEqual(details["base_ref"], "&lt;script&gt;alert(1)&lt;/script&gt;")
-        self.assertEqual(details["head_ref"], "(at)everyone")
+        self.assertEqual(details["base_ref"], "feature/x+y")
+        self.assertEqual(details["head_ref"], "release-1.0")
         entry = [c for c in catalog.build_catalog(state) if c["id"] == 100][0]
-        self.assertEqual(entry["comparison"]["base_ref"], "&lt;script&gt;alert(1)&lt;/script&gt;")
-        self.assertEqual(state["repositories"]["100"]["comparison"]["base_ref"], "<script>alert(1)</script>")
+        self.assertEqual(entry["comparison"]["base_ref"], "feature/x+y")
+        hostile = comparison(1, 0, base_ref="<script>alert(1)</script>", head_ref="@everyone‮")
+        state, events = self.assertDeterministic([run(T(5), [framework_root(), repo(rid=100, name="game-org/skyfall-recomp", is_fork=True, parent_repository_id=90, network_root_repository_id=90, comparison=hostile)])])
+        self.assertEqual(state["repositories"]["100"]["comparison"]["state"], "unavailable")
+        self.assertIsNone(state["repositories"]["100"]["comparison"]["base_ref"])
+        self.assertNotIn("<script", canonical(state))
 
 
 class T36T37DiscoveryRecords(CollectorTestCase):
@@ -435,8 +446,11 @@ class T38SharedShasPerRepository(CollectorTestCase):
         self.assertEqual(by_repo[303]["details"]["commit_shas"], [sha(0x77)])
         self.assertEqual(by_repo[304]["type"], "commits_observed")
         self.assertEqual(by_repo[304]["details"]["commit_shas"], [sha(0x77), sha(0x78)])
-        self.assertEqual(by_repo[304]["details"]["shared_shas"], [sha(0x77)])
-        self.assertEqual(by_repo[304]["details"]["shared_with_network_count"], 1)
+        # 0x77 arrived in both repositories in the same run: counted, never used to relabel.
+        self.assertEqual(by_repo[304]["details"]["shared_shas"], [])
+        self.assertEqual(by_repo[304]["details"]["shared_with_network_count"], 0)
+        self.assertEqual(by_repo[304]["details"]["shared_in_run_count"], 1)
+        self.assertEqual(by_repo[303]["details"]["shared_in_run_count"], 1)
         self.assertIn(sha(0x77), state["repositories"]["303"]["observed_commits"])
         self.assertIn(sha(0x77), state["repositories"]["304"]["observed_commits"])
         self.assertIn(sha(0x78), state["repositories"]["304"]["observed_commits"])
@@ -500,7 +514,7 @@ class HostileAncestryTests(CollectorTestCase):
         self.assertEqual(near["game"]["inherited_from"], 100)
         far = state["repositories"][str(1000 + depth - 1)]
         self.assertIsNone(far["game"]["key"])
-        self.assertEqual(far["ancestry_state"], "resolved")
+        self.assertEqual(far["ancestry_state"], "depth_exceeded")
         self.assertEqual(far["parent_repository_id"], 1000 + depth - 2)
 
 

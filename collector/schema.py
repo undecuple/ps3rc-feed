@@ -360,7 +360,15 @@ TIMESTAMP = Timestamp()
 SHA = Str(pattern=SHA_RE)
 FULL_NAME = FullName()
 OWNER = NamePart(MAX_OWNER)
-QUERY = Str(max_len=MAX_QUERY)
+# Operator search queries: GitHub search syntax characters only, no URLs.
+QUERY_RE = re.compile(r"[A-Za-z0-9 _.:/+\-\"()@#]{1,%d}\Z" % MAX_QUERY)
+QUERY = Str(pattern=QUERY_RE, max_len=MAX_QUERY)
+# Git reference names, the subset safe to carry around: no ':', '..', '@{', control or space.
+REF_RE = re.compile(r"(?!.*\.\.)(?!.*@\{)(?!.*/\.)(?!\.)[A-Za-z0-9][A-Za-z0-9._/+\-]{0,%d}\Z" % (MAX_TAG - 1))
+# Opaque scan cursors as the fetch layer hands them back.
+CURSOR_RE = re.compile(r"[A-Za-z0-9_=.:/+\-]{1,%d}\Z" % MAX_TAG)
+PATH_RE = re.compile(r"[A-Za-z0-9_.\[\]]{1,128}\Z")
+REJECTION_REASONS = ("invalid_ref", "invalid_cursor")
 
 COMMIT = Obj({"sha": SHA, "committed_at": TIMESTAMP, "message": Text(MAX_MESSAGE)})
 RELEASE = Obj({"id": PositiveId(), "tag": Text(MAX_TAG), "published_at": TIMESTAMP})
@@ -399,27 +407,27 @@ REPOSITORY = Obj(
 
 COMPARISON_STATES = ("complete", "partial", "unavailable", "not_comparable")
 COMPARISON_FIELDS = ("base_repository_id", "base_ref", "head_ref", "base_sha", "head_sha", "ahead", "behind", "collected_at")
-COMPARISON = Obj(
-    {
-        "base_repository_id": Nullable(PositiveId()),
-        "base_ref": Nullable(Text(MAX_TAG)),
-        "head_ref": Nullable(Text(MAX_TAG)),
-        "base_sha": Nullable(SHA),
-        "head_sha": Nullable(SHA),
-        "ahead": Nullable(NonNegInt()),
-        "behind": Nullable(NonNegInt()),
-        "state": Enum(COMPARISON_STATES),
-        "collected_at": Nullable(TIMESTAMP),
-    },
-    optional=COMPARISON_FIELDS,
-)
+_COMPARISON_TYPES = {
+    "base_repository_id": Nullable(PositiveId()),
+    "base_ref": Nullable(Text(MAX_TAG)),
+    "head_ref": Nullable(Text(MAX_TAG)),
+    "base_sha": Nullable(SHA),
+    "head_sha": Nullable(SHA),
+    "ahead": Nullable(NonNegInt()),
+    "behind": Nullable(NonNegInt()),
+    "state": Enum(COMPARISON_STATES),
+    "collected_at": Nullable(TIMESTAMP),
+    "future_dated": Bool(),
+}
+# From a run: optional fields are filled with null by the loader.
+COMPARISON = Obj(dict(_COMPARISON_TYPES), optional=COMPARISON_FIELDS + ("future_dated",))
+# In state: every field present, nothing filled in.
+COMPARISON_STORED = Obj(dict(_COMPARISON_TYPES))
 REPOSITORY.fields["comparison"] = Nullable(COMPARISON)
 
 
 def check_comparison(comparison, path):
     """Unknown divergence is null with an unavailable state; a known one has both counts."""
-    for field in COMPARISON_FIELDS:
-        comparison.setdefault(field, None)
     if comparison["state"] in ("unavailable", "not_comparable"):
         if comparison["ahead"] is not None or comparison["behind"] is not None:
             raise SchemaError("%s: ahead/behind must be null when the comparison is %s" % (path, comparison["state"]))
@@ -429,6 +437,39 @@ def check_comparison(comparison, path):
         if comparison["collected_at"] is None:
             raise SchemaError("%s: a %s comparison needs collected_at" % (path, comparison["state"]))
     return comparison
+
+
+def _downgrade_comparison(comparison, path, rejected, field):
+    rejected.append({"path": "%s.%s" % (path, field), "reason": "invalid_ref"})
+    for key in COMPARISON_FIELDS:
+        comparison[key] = None
+    comparison["state"] = "unavailable"
+
+
+def normalise_run_comparison(repo, index, run_at, rejected):
+    """Fill, clamp and sanity-check one repository's comparison block from a run.
+
+    A ref outside the git reference character set does not refuse the run:
+    the comparison becomes unavailable and the field is listed in
+    `rejected_fields`. A collected_at after the run time is clamped and
+    flagged `future_dated`.
+    """
+    comparison = repo.get("comparison")
+    if comparison is None:
+        return
+    path = "repositories[%d].comparison" % index
+    for field in COMPARISON_FIELDS:
+        comparison.setdefault(field, None)
+    comparison.setdefault("future_dated", False)
+    for field in ("base_ref", "head_ref"):
+        value = comparison[field]
+        if value is not None and REF_RE.fullmatch(value) is None:
+            _downgrade_comparison(comparison, path, rejected, field)
+            return
+    if comparison["collected_at"] is not None and comparison["collected_at"] > run_at:
+        comparison["collected_at"] = run_at
+        comparison["future_dated"] = True
+    check_comparison(comparison, "run." + path)
 
 ROOT = Obj(
     {
@@ -442,6 +483,8 @@ ROOT = Obj(
     optional=("found_repository_ids", "resume_cursor"),
 )
 SEARCH = Obj({"query": QUERY, "complete": Bool(), "repository_ids": List(PositiveId(), MAX_IDS)})
+REJECTED = Obj({"path": Str(pattern=PATH_RE, max_len=128), "reason": Enum(REJECTION_REASONS)})
+MAX_REJECTED = 100
 
 RUN = Obj(
     {
@@ -450,14 +493,33 @@ RUN = Obj(
         "roots": List(ROOT, MAX_IDS),
         "searches": List(SEARCH, MAX_IDS),
         "repositories": List(REPOSITORY, MAX_REPOSITORIES),
+        # Written by validate_run: fields it downgraded instead of refusing the run.
+        "rejected_fields": List(REJECTED, MAX_REJECTED),
     },
-    optional=("fictional",),
+    optional=("fictional", "rejected_fields"),
 )
 
 
 def validate_run(run):
-    """Check a parsed run document (bounding its free text in place); raise SchemaError."""
+    """Check a parsed run document (bounding its free text in place); raise SchemaError.
+
+    Hostile per-repository values that the collector can live without (a
+    comparison ref, a scan cursor) are downgraded and listed in
+    run["rejected_fields"]; operator configuration (search queries) and
+    everything structural raises.
+    """
     RUN.check(run, "run")
+    # A run validated twice keeps the notes from the first pass.
+    rejected = [dict(r) for r in run.get("rejected_fields", [])]
+    run_at = run["run_at"]
+    for i, search in enumerate(run["searches"]):
+        if "://" in search["query"] or _SCHEME_RE.match(search["query"]) is not None:
+            raise SchemaError("run.searches[%d].query: a search query must not contain a URL" % i)
+    for i, root in enumerate(run["roots"]):
+        cursor = root.get("resume_cursor")
+        if cursor is not None and CURSOR_RE.fullmatch(cursor) is None:
+            root["resume_cursor"] = None
+            rejected.append({"path": "roots[%d].resume_cursor" % i, "reason": "invalid_cursor"})
     seen = set()
     for i, repo in enumerate(run["repositories"]):
         rid = repo["repository_id"]
@@ -477,14 +539,18 @@ def validate_run(run):
             ids = [r["id"] for r in repo["releases"]]
             if len(set(ids)) != len(ids):
                 raise SchemaError("run.repositories[%d]: duplicate release id" % i)
-        if repo.get("comparison") is not None:
-            check_comparison(repo["comparison"], "run.repositories[%d].comparison" % i)
+        normalise_run_comparison(repo, i, run_at, rejected)
     queries = [s["query"] for s in run["searches"]]
     if len(set(queries)) != len(queries):
         raise SchemaError("run.searches: duplicate query")
     root_ids = [r["repository_id"] for r in run["roots"]]
     if len(set(root_ids)) != len(root_ids):
         raise SchemaError("run.roots: duplicate repository_id")
+    unique = []
+    for entry in rejected:
+        if entry not in unique:
+            unique.append(entry)
+    run["rejected_fields"] = unique[:MAX_REJECTED]
     return run
 
 
@@ -559,13 +625,14 @@ GAME = Obj(
     {
         "key": Nullable(Str(pattern=re.compile(r"[a-z0-9-]+\Z"), max_len=64)),
         "title": Nullable(Text(MAX_TAG)),
-        "basis": Nullable(Enum(("readme_title", "inherited_from_parent"))),
+        "basis": Nullable(Enum(("readme_title", "inherited_from_parent", "inherited_unverified_copy"))),
         "confidence": Enum(("strong", "weak", "unknown")),
         "inferred": Bool(),
         "verified": Bool(),
         "inherited_from": Nullable(PositiveId()),
     }
 )
+INHERITED_BASES = ("inherited_from_parent", "inherited_unverified_copy")
 TOOLKIT = Obj(
     {
         "name": Nullable(Str(pattern=LABEL_RE, max_len=64)),
@@ -574,7 +641,31 @@ TOOLKIT = Obj(
         "inherited_from": Nullable(PositiveId()),
     }
 )
-ANCESTRY_STATE = Enum(("none", "resolved", "unresolved", "unknown", "inconsistent"))
+ANCESTRY_STATE = Enum(("none", "resolved", "unresolved", "unknown", "inconsistent", "depth_exceeded"))
+ANCESTRY_HISTORY = Obj(
+    {
+        "is_fork": Nullable(Bool()),
+        "parent_repository_id": Nullable(PositiveId()),
+        "network_root_repository_id": Nullable(PositiveId()),
+        "until": TIMESTAMP,
+    }
+)
+FIRST_SIGHT = Obj(
+    {
+        "heading": Nullable(Text(MAX_TAG)),
+        "ancestor_heading": Nullable(Text(MAX_TAG)),
+        "ancestor_repository_id": Nullable(PositiveId()),
+    }
+)
+COMPARISON_STATUS = Obj(
+    {
+        "last_reported_state": Nullable(Enum(COMPARISON_STATES)),
+        "last_reported_at": Nullable(TIMESTAMP),
+        "stale": Bool(),
+    }
+)
+COMPARISON_HISTORY = Obj(dict(_COMPARISON_TYPES, replaced_at=TIMESTAMP))
+MAX_HISTORY = 20
 
 OBSERVATION = Obj(
     {
@@ -612,9 +703,14 @@ OBSERVATION = Obj(
         "game": GAME,
         "toolkit": TOOLKIT,
         "ancestry_state": ANCESTRY_STATE,
+        "ancestry_history": List(ANCESTRY_HISTORY, MAX_HISTORY),
+        "fork_discovered_done": Bool(),
+        "first_sight": Nullable(FIRST_SIGHT),
         "discovery_roots": List(PositiveId(), MAX_SOURCES),
         "discovery_queries": List(QUERY, MAX_SOURCES),
-        "comparison": COMPARISON,
+        "comparison": COMPARISON_STORED,
+        "comparison_status": COMPARISON_STATUS,
+        "comparison_history": List(COMPARISON_HISTORY, MAX_HISTORY),
     }
 )
 
@@ -640,6 +736,8 @@ COLLECTION = Obj(
         "incomplete_roots": List(PositiveId(), MAX_IDS),
         # Ids named by a search or a fork-network scan that have no observation yet.
         "pending_repository_ids": List(PositiveId(), MAX_IDS),
+        # Fields the last run's loader downgraded instead of refusing the run.
+        "rejected_fields": List(REJECTED, MAX_REJECTED),
     }
 )
 
@@ -666,8 +764,21 @@ def validate_state(state):
         if obs["tip_sha"] is not None and obs["tip_sha"] not in obs["observed_commits"]:
             raise SchemaError("state.repositories[%r]: tip_sha is not an observed commit" % key)
         check_comparison(obs["comparison"], "state.repositories[%r].comparison" % key)
-        if (obs["game"]["basis"] == "inherited_from_parent") != (obs["game"]["inherited_from"] is not None):
+        if (obs["game"]["basis"] in INHERITED_BASES) != (obs["game"]["inherited_from"] is not None):
             raise SchemaError("state.repositories[%r].game: inherited_from and basis disagree" % key)
+        if obs["game"]["verified"] is not False or obs["game"]["inferred"] is not True:
+            raise SchemaError("state.repositories[%r].game: associations are always inferred and unverified" % key)
+        if len(set(obs["discovery_roots"])) != len(obs["discovery_roots"]):
+            raise SchemaError("state.repositories[%r].discovery_roots: duplicate ids" % key)
+        if obs["is_fork"] is not True and obs["ancestry_state"] in ("resolved", "unresolved", "depth_exceeded"):
+            raise SchemaError("state.repositories[%r].ancestry_state: %s on a non-fork" % (key, obs["ancestry_state"]))
+        if obs["is_fork"] is None and obs["ancestry_state"] != "unknown":
+            raise SchemaError("state.repositories[%r].ancestry_state: expected unknown" % key)
+    for key, root in state["collection"]["roots"].items():
+        if (root["scan_state"] == "complete") != root["forks_scan_complete"]:
+            raise SchemaError("state.collection.roots[%r]: scan_state contradicts forks_scan_complete" % key)
+        if len(set(root["found_repository_ids"])) != len(root["found_repository_ids"]):
+            raise SchemaError("state.collection.roots[%r]: duplicate found ids" % key)
     seen = set()
     for i, event in enumerate(state["events"]):
         validate_event(event)
