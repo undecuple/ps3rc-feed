@@ -9,6 +9,7 @@
 
   let state = T.initialState();
   let data = null; // last loaded feed
+  let outLines = 0; // running line number for command output
   let fromFallback = false; // data is the embedded sample, so the next real feed is a first load
   let preType = null; // search text before the prompt started live searching
   let live = []; // raw events shown
@@ -387,6 +388,7 @@
   function print(line, kind) {
     const out = $('out');
     const d = el('div', line.kind || kind || '');
+    d.dataset.n = String(++outLines);
     d.append(document.createTextNode(line.text));
     const href = line.href ? T.safeGithubUrl(line.href) : null;
     if (href) {
@@ -399,6 +401,13 @@
     out.append(d);
     while (out.childNodes.length > 300) out.firstChild.remove();
     out.scrollTop = out.scrollHeight;
+    $('outcount').textContent = outLines + (outLines === 1 ? ' line' : ' lines');
+  }
+
+  function clearOut() {
+    outLines = 0;
+    $('out').replaceChildren();
+    $('outcount').textContent = '0 lines';
   }
 
   function run(line) {
@@ -415,7 +424,7 @@
         if (url) window.open(url, '_blank', 'noopener,noreferrer');
       } else if (fx.type === 'demo') startDemo(fx.n);
       else if (fx.type === 'demo-stop') stopDemo();
-      else if (fx.type === 'clear') $('out').replaceChildren();
+      else if (fx.type === 'clear') clearOut();
       else if (fx.type === 'reset') resetData();
     }
     if (wasPaused && !state.paused) flushHeld();
@@ -437,7 +446,7 @@
     const input = ev.target;
     if (ev.ctrlKey && ev.key.toLowerCase() === 'l') {
       ev.preventDefault();
-      $('out').replaceChildren();
+      clearOut();
     } else if (ev.key === 'Enter') {
       const line = input.value.trim();
       preType = null;
