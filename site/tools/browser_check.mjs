@@ -6,6 +6,9 @@
 //               the page must show that the feed could not be loaded, not throw and not show any data
 // Both served runs also open the recent view at desktop and phone width: rows ordered by first seen,
 // newest first, the first seen note shown, and the First seen heading flips the order.
+// Both served runs also type a search that matches nothing in each list view at desktop and phone width: a link to
+// GitHub's own repository search appears under the empty message, and goes away for a matching search, a cleared
+// search and the About view.
 //   no-events - the real copy with its events emptied, as after a first collection: the feed view says
 //               there are no events yet and the table view still lists the repositories
 // Usage: node tools/browser_check.mjs <chromium-binary> [--no-sandbox]
@@ -194,6 +197,80 @@ for (const [kind, page, search] of runs) {
     r.escapeRestoresRows = (await rows()).length === r.rowsAtStart;
     check(r.escapeRestoresRows, name + ': Esc did not restore rows');
     await evalJs("document.getElementById('cmd').value = ''");
+    {
+      // a search that matches nothing offers a plain link to GitHub's own search; a matching search, no search
+      // and the About view show none
+      const ghUrl = (t) => 'https://github.com/search?q=' + encodeURIComponent(t.trim()).replace(/'/g, '%27') + '&type=repositories';
+      const ghNote = 'Not in this list? Our data comes from scheduled collections and may be missing repositories.';
+      const ghLink = () => evalJs(`(() => {
+        const a = document.querySelector('#view #github-search');
+        const note = document.querySelector('#view #github-search-note');
+        const empty = document.querySelector('#view p.empty');
+        const box = document.getElementById('view');
+        return a ? {
+          href: a.getAttribute('href'), target: a.target, rel: a.rel, text: a.textContent,
+          note: note ? note.textContent : null, empty: empty ? empty.textContent : null,
+          order: !!(empty && note && (empty.compareDocumentPosition(note) & 4) && (note.compareDocumentPosition(a) & 4)),
+          linkRight: Math.round(a.getBoundingClientRect().right), boxRight: Math.round(box.getBoundingClientRect().right),
+          rows: document.querySelectorAll('#view .row').length,
+        } : { none: true, rows: document.querySelectorAll('#view .row').length };
+      })()`);
+      const typeFresh = async (t) => {
+        await evalJs("document.getElementById('cmd').value = ''");
+        await typeOnly(t);
+      };
+      const esc = async () => {
+        for (const type of ['keyDown', 'keyUp']) await cmd('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await sleep(300);
+      };
+      const nonsense = 'zzqx "no<match>" & 100% it\'s';
+      const long = 'qzv'.repeat(30);
+      r.ghLink = {};
+      await typeLine('reset');
+      for (const v of ['feed', 'table', 'forks', 'recent']) {
+        await typeLine('view ' + v);
+        await typeFresh(nonsense);
+        const got = await ghLink();
+        r.ghLink[v] = got;
+        check(!got.none && got.rows === 0 && got.href === ghUrl(nonsense), name + ': ' + v + ' github search link href ' + JSON.stringify(got));
+        check(got.target === '_blank' && /\bnoopener\b/.test(got.rel || '') && /\bnoreferrer\b/.test(got.rel || ''), name + ': ' + v + ' github search link target/rel ' + JSON.stringify(got));
+        check(got.text === 'Search GitHub for "' + nonsense + '"' && got.note === ghNote && got.order && /^No rows match|^Nothing here|^No events yet/.test(got.empty || ''), name + ': ' + v + ' github search link text, note or order ' + JSON.stringify(got));
+        check(got.linkRight <= got.boxRight + 1 && (await evalJs('document.documentElement.scrollWidth')) <= r.innerWidth, name + ': ' + v + ' github search link overflows');
+        if (v === 'feed') await shot('-github-search');
+        await esc();
+        const cleared = await ghLink();
+        check(cleared.none && cleared.rows + (await evalJs("document.querySelectorAll('#view tbody tr').length")) > 0, name + ': ' + v + ' clearing the search did not remove the link ' + JSON.stringify(cleared));
+      }
+      // long text: the link shows 60 characters and an ellipsis, the href keeps it all, and it wraps on a phone
+      await typeLine('view table');
+      await typeFresh(long);
+      const lg = await ghLink();
+      r.ghLink.long = { text: lg.text, href: lg.href, linkRight: lg.linkRight, boxRight: lg.boxRight };
+      check(lg.href === ghUrl(long) && lg.text === 'Search GitHub for "' + long.slice(0, 60) + '..."', name + ': long github search link ' + JSON.stringify(r.ghLink.long));
+      check(lg.linkRight <= lg.boxRight + 1 && (await evalJs('document.documentElement.scrollWidth')) <= r.innerWidth && (await evalJs("document.getElementById('view').scrollWidth <= document.getElementById('view').clientWidth")), name + ': long github search link does not wrap');
+      if (mobile) await shot('-github-search-long');
+      await esc();
+      // a search that matches shows rows and no link
+      await typeLine('view feed');
+      await typeFresh(search);
+      const matched = await ghLink();
+      r.ghLink.matching = matched;
+      check(matched.none && matched.rows > 0, name + ': matching search shows the github search link ' + JSON.stringify(matched));
+      await esc();
+      // the About view never shows it, even with a search that matches nothing
+      await evalJs("document.getElementById('cmd').value = ''");
+      await typeLine('search zzqxnomatch');
+      const before = await ghLink();
+      await typeLine('view about');
+      const about = await ghLink();
+      r.ghLink.about = about;
+      check(!before.none && before.href === ghUrl('zzqxnomatch') && about.none && !(await evalJs("!!document.querySelector('#view .empty')")), name + ': about view github search link ' + JSON.stringify({ before, about }));
+      await typeLine('view feed');
+      await typeLine('search');
+      check((await ghLink()).none, name + ': search command clearing did not remove the link');
+      await typeLine('reset');
+      await evalJs("document.getElementById('cmd').value = ''");
+    }
     await typeLine('filter category:framework');
     const afterFilter = await rows();
     await typeLine('sort -stars');

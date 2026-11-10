@@ -345,6 +345,27 @@
     return d;
   }
 
+  // Under an empty view after a search: a plain link to GitHub's own search, opened in a new tab. No request from here.
+  const SHOW_CHARS = 60;
+  function githubSearchLink(search) {
+    const href = T.githubSearchUrl(search);
+    if (!href) return null;
+    const chars = Array.from(search.trim());
+    const shownText = chars.length > SHOW_CHARS ? chars.slice(0, SHOW_CHARS).join('') + '...' : chars.join('');
+    const d = el('div', 'empty ghsearch');
+    const note = el('p', null, T.NO_MATCH_NOTE);
+    note.id = 'github-search-note';
+    const a = el('a', null, 'Search GitHub for "' + shownText + '"');
+    a.id = 'github-search';
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    const p = el('p');
+    p.append(a);
+    d.append(note, p);
+    return d;
+  }
+
   function render(opts) {
     recs = T.joinData({ repos: data ? data.repos : [], events: live }, now());
     const box = $('view');
@@ -359,6 +380,8 @@
       box.append(el('p', 'empty', failures ? 'The feed could not be loaded, so nothing is shown. Connection: ' + conn + '.' : 'loading...'));
     } else if (!shown.length) {
       box.append(el('p', 'empty', T.emptyMessage(state.view, all.length, recs.repos.length)));
+      const more = githubSearchLink(state.search);
+      if (more) box.append(more);
     } else if (state.view === 'feed') {
       const ul = el('ul', 'feed');
       const head = el('li', 'colhead');
