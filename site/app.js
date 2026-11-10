@@ -198,7 +198,8 @@
     let items = state.view === 'feed' ? recs.events : recs.repos;
     if (state.view === 'forks') items = items.filter((r) => r.fork === true);
     const kept = T.dropUntouched(items, state);
-    return { all: items, shown: T.sortRecords(kept.filter((r) => T.matches(r, state.filters, state.search, t)), state.sort), hidden: items.length - kept.length };
+    const sort = state.view === 'recent' ? T.sortRecent : T.sortRecords;
+    return { all: items, shown: sort(kept.filter((r) => T.matches(r, state.filters, state.search, t)), state.sort), hidden: items.length - kept.length };
   }
 
   function rowButton(rec, cls) {
@@ -209,7 +210,7 @@
   }
 
   // Column headings that can sort: clicking one runs the same `sort` command as the sort chips.
-  const HEAD_SORT = { Time: 'time', Game: 'game', 'Game / inferred title': 'game', 'Game association': 'game', Owner: 'owner', 'Latest commit': 'time', 'Commits 30d': 'commits', Stars: 'stars', Status: 'status' };
+  const HEAD_SORT = { Time: 'time', Game: 'game', 'Game / inferred title': 'game', 'Game association': 'game', Owner: 'owner', 'Latest commit': 'time', 'Commits 30d': 'commits', Stars: 'stars', Status: 'status', 'First seen': 'first-seen' };
 
   function sortHead(tag, label) {
     const node = el(tag);
@@ -295,6 +296,34 @@
     return wrap;
   }
 
+  // Repositories by when this collector first saw them. Same row rules as the table.
+  function recentView(rows) {
+    const wrap = el('div', 'tablewrap recent');
+    const note = el('p', 'tablenote', T.RECENT_NOTE);
+    note.id = 'recent-note';
+    wrap.append(note);
+    const table = el('table');
+    table.append(el('caption', null, 'Recently discovered (one row per repository)'));
+    const tr0 = el('tr');
+    ['First seen', 'Game', 'Repository', 'Stars', 'Description'].forEach((h) => tr0.append(sortHead('th', h)));
+    const thead = el('thead');
+    thead.append(tr0);
+    table.append(thead);
+    const tbody = el('tbody');
+    for (const r of rows) {
+      const tr = el('tr');
+      tr.append(el('td', 'firstseen', T.fmtTime(r.firstSeen)));
+      cell(tr, T.gameLabel(r));
+      repoCell(tr, r);
+      cell(tr, T.orUnknown(r.stars));
+      tr.append(el('td', 'desc', r.description || ''));
+      tbody.append(tr);
+    }
+    table.append(tbody);
+    wrap.append(table);
+    return wrap;
+  }
+
   function aboutView() {
     const d = el('div', 'about');
     const add = (tag, text) => d.append(el(tag, null, text));
@@ -322,7 +351,7 @@
     const prevTop = box.scrollTop;
     const { all, shown, hidden } = visibleItems();
     box.replaceChildren();
-    box.setAttribute('aria-label', { feed: 'Feed', table: 'Catalog table', forks: 'Fork network', about: 'About' }[state.view]);
+    box.setAttribute('aria-label', { feed: 'Feed', table: 'Catalog table', forks: 'Fork network', recent: 'Recently discovered', about: 'About' }[state.view]);
 
     if (state.view === 'about') {
       box.append(aboutView());
@@ -341,6 +370,8 @@
         g.items.forEach((r) => ul.append(feedRow(r)));
       }
       box.append(ul);
+    } else if (state.view === 'recent') {
+      box.append(recentView(shown));
     } else {
       box.append(tableView(shown, state.view === 'forks'));
     }

@@ -4,6 +4,8 @@
 //   real      - served over http://127.0.0.1 as deployed (data/ is the real export, testdata/ left out)
 //   real-file - the real copy opened over file://, where fetch is unavailable and the fallback is null:
 //               the page must show that the feed could not be loaded, not throw and not show any data
+// Both served runs also open the recent view at desktop and phone width: rows ordered by first seen,
+// newest first, the first seen note shown, and the First seen heading flips the order.
 //   no-events - the real copy with its events emptied, as after a first collection: the feed view says
 //               there are no events yet and the table view still lists the repositories
 // Usage: node tools/browser_check.mjs <chromium-binary> [--no-sandbox]
@@ -221,11 +223,71 @@ for (const [kind, page, search] of runs) {
     await shot('-table');
     r.horizontalScrollAfter = (await evalJs('document.documentElement.scrollWidth')) > r.innerWidth;
     check(!r.horizontalScrollAfter, name + ': horizontal scroll after table');
+    {
+      // recent view: repositories by first seen, newest first, with the note above the table
+      await typeLine('reset');
+      await typeLine('view table');
+      const tableRows = await evalJs("document.querySelectorAll('#view tbody tr').length");
+      await typeLine('view recent');
+      const recentCol = () => evalJs(`(() => {
+        const ths = [...document.querySelectorAll('#view thead th')];
+        const i = ths.findIndex((t) => /^First seen/.test(t.textContent));
+        const trs = [...document.querySelectorAll('#view tbody tr')];
+        return {
+          heads: ths.map((t) => t.textContent.replace(/ [▲▼]/, '')),
+          sort: i < 0 ? null : ths[i].getAttribute('aria-sort'),
+          times: i < 0 ? [] : trs.map((tr) => tr.children[i].textContent),
+          rows: trs.length,
+          note: (document.getElementById('recent-note') || {}).textContent || null,
+          noteAbove: !!document.querySelector('#view #recent-note + table'),
+        };
+      })()`);
+      const ordered = (v, dir) => {
+        const known = v.filter((x) => x !== 'unknown');
+        const unknownLast = v.slice(known.length).every((x) => x === 'unknown');
+        return unknownLast && known.every((x, i) => /^\d{4}-\d\d-\d\d \d\d:\d\d UTC$/.test(x) && (i === 0 || (dir === 'desc' ? known[i - 1] >= x : known[i - 1] <= x)));
+      };
+      const first = await recentCol();
+      const note = 'First seen by this collector. Repositories first listed in a baseline collection all share one time, and the date is not when the repository was created.';
+      r.recent = { rows: first.rows, tableRows, sort: first.sort, top: first.times.slice(0, 3), distinct: new Set(first.times).size };
+      check(first.heads.join() === 'First seen,Game,Repository,Stars,Description', name + ': recent headings ' + JSON.stringify(first.heads));
+      check(first.rows > 0 && first.rows === tableRows, name + ': recent view does not list the same repositories as the table ' + first.rows + ' vs ' + tableRows);
+      check(first.sort === 'descending' && ordered(first.times, 'desc'), name + ': recent view is not newest first seen first ' + JSON.stringify(r.recent));
+      check(first.note === note && first.noteAbove, name + ': recent note missing or not above the table ' + JSON.stringify(first.note));
+      check((await evalJs('document.documentElement.scrollWidth')) <= r.innerWidth, name + ': horizontal scroll in the recent view');
+      check((await evalJs("document.getElementById('view').scrollWidth <= document.getElementById('view').clientWidth")), name + ': the recent table scrolls sideways');
+      // the first seen time keeps the date whole: one line on a desktop, date and clock on two lines on a phone
+      r.recent.firstSeenLines = await evalJs(`(() => {
+        const td = document.querySelector('#view td.firstseen');
+        if (!td || !td.firstChild) return null;
+        const range = document.createRange();
+        range.selectNodeContents(td);
+        const lines = [];
+        for (const rect of range.getClientRects()) if (!lines.some((t) => Math.abs(t - rect.top) < 3)) lines.push(rect.top);
+        range.setEnd(td.firstChild, 10);
+        return { lines: lines.length, dateOnOneLine: new Set([...range.getClientRects()].map((x) => Math.round(x.top))).size === 1 };
+      })()`);
+      check(r.recent.firstSeenLines && r.recent.firstSeenLines.dateOnOneLine && r.recent.firstSeenLines.lines === (mobile ? 2 : 1), name + ': first seen cell wraps badly ' + JSON.stringify(r.recent.firstSeenLines));
+      await shot('-recent');
+      await evalJs("[...document.querySelectorAll('#view thead th button')].find((b) => /^First seen/.test(b.textContent)).click()");
+      await sleep(200);
+      const flipped = await recentCol();
+      r.recent.afterClick = { sort: flipped.sort, top: flipped.times.slice(0, 3) };
+      check(flipped.sort === 'ascending' && flipped.rows === first.rows && ordered(flipped.times, 'asc'), name + ': clicking First seen does not flip the order ' + JSON.stringify(r.recent.afterClick));
+      if (r.recent.distinct > 1) check(flipped.times[0] !== first.times[0], name + ': clicking First seen left the first row in place');
+      // filters narrow the recent view like the table
+      await typeLine('sort -first-seen');
+      await typeLine('filter category:framework');
+      const filtered = await recentCol();
+      r.recent.filtered = filtered.rows;
+      check(filtered.rows > 0 && filtered.rows < first.rows && ordered(filtered.times, 'desc'), name + ': filter in the recent view ' + filtered.rows);
+      await typeLine('reset');
+    }
     if (kind === 'real') {
       // the column headings stay at the top of the scrolling view
       await typeLine('reset');
       r.sticky = {};
-      for (const v of ['feed', 'table', 'forks']) {
+      for (const v of ['feed', 'table', 'forks', 'recent']) {
         await typeLine('view ' + v);
         r.sticky[v] = await evalJs(`(() => {
           const box = document.getElementById('view');
@@ -243,7 +305,7 @@ for (const [kind, page, search] of runs) {
           continue;
         }
         check(r.sticky[v].scrolled > 0 && r.sticky[v].visible, name + ': ' + v + ' heading sticks (' + JSON.stringify(r.sticky[v]) + ')');
-        if (v === 'forks' || v === 'table') await shot('-sticky-' + v);
+        if (v !== 'feed') await shot('-sticky-' + v);
       }
       // clicking a column heading sorts by it; a second click flips the direction
       await typeLine('view table');

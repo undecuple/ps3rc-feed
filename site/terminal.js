@@ -31,7 +31,7 @@
   const TEXT_FIELDS = ['game', 'repo', 'owner', 'toolkit'];
   const SORT_KEYS = ['time', 'owner', 'author', 'game', 'category', 'status', 'stars', 'commits', 'first-seen'];
   const GROUPS = ['none', 'game', 'owner', 'category', 'status', 'toolkit', 'type'];
-  const VIEWS = ['feed', 'table', 'forks', 'about'];
+  const VIEWS = ['feed', 'table', 'forks', 'recent', 'about'];
   const ROUTES = [
     '/feed.xml',
     '/feeds/frameworks/ps3recomp.xml',
@@ -53,7 +53,7 @@
     order: ['order newest|oldest', 'time order of the list'],
     scroll: ['scroll auto|manual', 'auto follows the newest edge; manual never moves your view'],
     untouched: ['untouched show|hide', 'forks with no stars and no commits in 30 days are hidden by default; typing a search shows them'],
-    view: ['view feed|table|forks|about', 'also: feed, table, forks, about as commands'],
+    view: ['view feed|table|forks|recent|about', 'also: feed, table, forks, recent, about as commands. recent lists repositories by when this collector first saw them'],
     subscribe: ['subscribe', 'print the proposed RSS routes'],
     demo: ['demo [n|stop]', 'insert fictional demo events one by one (not real activity)'],
     status: ['status', 'feed freshness and current settings'],
@@ -65,7 +65,7 @@
     filter: ['filter category:framework status:active', 'filter owner:example time:<7d', 'filter time:>7d stars:>10', 'filter fork:yes game:unknown'],
     sort: ['sort -time', 'sort author', 'sort stars desc'],
   };
-  const COMMAND_NAMES = Object.keys(HELP).concat(['feed', 'table', 'forks']).sort();
+  const COMMAND_NAMES = Object.keys(HELP).concat(['feed', 'table', 'forks', 'recent']).sort();
 
   function initialState() {
     return { view: 'feed', filters: [], search: '', sort: { key: 'time', dir: 'desc' }, group: 'none', paused: false, scroll: 'auto', hideUntouched: true };
@@ -248,6 +248,7 @@
       stars: num(r.stars),
       commits: num(r.commits_30d),
       firstSeen: ms(r.first_seen_at),
+      description: str(r.description),
       time: ms(r.last_commit_at),
       untouched: r.fork === true && num(r.stars) === 0 && (num(r.commits_30d) === 0 || num(r.ahead) === 0),
       stale: r.collection_failing === true,
@@ -343,6 +344,18 @@
         return c ? c * sign : a[1] - b[1];
       })
       .map((x) => x[0]);
+  }
+
+  // Recent view order: the chosen sort first, then stars (most first), then repository name.
+  function sortRecent(list, sort) {
+    const name = (r) => (r.repo || '').toLowerCase();
+    const base = list.slice().sort((a, b) => {
+      const sa = a.stars === null || a.stars === undefined ? -1 : a.stars;
+      const sb = b.stars === null || b.stars === undefined ? -1 : b.stars;
+      if (sa !== sb) return sb - sa;
+      return name(a) < name(b) ? -1 : name(a) > name(b) ? 1 : 0;
+    });
+    return sortRecords(base, sort);
   }
 
   function groupValue(rec, field) {
@@ -497,7 +510,9 @@
 
   const NO_EVENTS_YET = 'No events yet. The next collection compares against this baseline. The table and forks views list the repositories already found.';
 
-  // Message for a view with no rows to show. total: rows of this view before filters;
+  const RECENT_NOTE = 'First seen by this collector. Repositories first listed in a baseline collection all share one time, and the date is not when the repository was created.';
+
+  // Message for a view with no rows to show (feed, table, forks, recent). total: rows of this view before filters;
   // repoCount: repositories in the feed. The About view always has content, so it gets null.
   function emptyMessage(view, total, repoCount) {
     if (view === 'about') return null;
@@ -629,8 +644,12 @@
     view(s, args, ctx, o) {
       const v = (args[0] || '').toLowerCase();
       if (!VIEWS.includes(v)) return o.push(err('usage: view ' + VIEWS.join('|')));
+      // Entering the recent view with the default sort switches to newest first seen first.
+      // Any other sort the user picked is kept.
+      const recentSort = v === 'recent' && s.view !== 'recent' && s.sort.key === 'time' && s.sort.dir === 'desc';
+      if (recentSort) s.sort = { key: 'first-seen', dir: 'desc' };
       s.view = v;
-      o.push(ok('view: ' + v));
+      o.push(ok('view: ' + v + (recentSort ? '  sort: ' + sortLabel(s.sort) : '')));
     },
     clear(s, args, ctx, o, fx) {
       fx.push({ type: 'clear' });
@@ -644,6 +663,7 @@
   COMMANDS.feed = (s, a, c, o) => COMMANDS.view(s, ['feed'], c, o);
   COMMANDS.table = (s, a, c, o) => COMMANDS.view(s, ['table'], c, o);
   COMMANDS.forks = (s, a, c, o) => COMMANDS.view(s, ['forks'], c, o);
+  COMMANDS.recent = (s, a, c, o) => COMMANDS.view(s, ['recent'], c, o);
 
   // Forks with no stars and no recent commits are noise in a list; a typed search always sees them.
   function dropUntouched(items, state) {
@@ -788,6 +808,6 @@
     deriveStatus, joinData, matches, dropUntouched, sortRecords, groupRecords, execute, complete,
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
     orUnknown, gameLabel, eventTime, compareLabel, noticeText, collectionState, feedStale,
-    emptyMessage,
+    emptyMessage, sortRecent, RECENT_NOTE,
   };
 });
