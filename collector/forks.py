@@ -253,7 +253,8 @@ def resolve_associations(repositories):
                     break
             if game is None and copied_from is not None and not chain:
                 # Parent untracked; the heading copies the tracked root's: an unverified copy.
-                heading = own_heading(copied_from)
+                # Same title rules as the root's own classification.
+                heading = text.game_title(copied_from["full_name"].split("/", 1)[1].lower(), own_heading(copied_from))
                 key = text.slug(heading)
                 if key is not None:
                     game = {
