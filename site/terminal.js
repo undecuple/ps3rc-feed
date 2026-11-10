@@ -264,7 +264,9 @@
         typeLabel: typeLabel(e.type),
         types: [e.type],
         summary: str(e.summary),
-        time: ms(e.source_at),
+        // events without a source time (discovery events) use their collection time for display, filter and sort
+        time: ms(e.source_at) === null ? ms(e.observed_at) : ms(e.source_at),
+        sourceTime: ms(e.source_at),
         observedAt: ms(e.observed_at),
         stale: Boolean((r && r.stale) || e.type === 'collection_stale'),
         sample: e.sample === true || Boolean(r && r.sample),
@@ -406,7 +408,7 @@
     lines.push('fork: ' + (rec.fork === null ? 'unknown' : rec.fork ? 'yes' : 'no') + '   parent: ' + orUnknown(rec.parent) + '   root: ' + orUnknown(rec.root));
     lines.push('stars: ' + orUnknown(rec.stars) + '   commits 30d: ' + orUnknown(rec.commits) + '   first seen: ' + fmtTime(rec.firstSeen));
     if (rec.kind === 'event') {
-      lines.push('source time: ' + fmtTime(rec.time));
+      lines.push('source time: ' + fmtTime(rec.sourceTime));
       lines.push('collected:   ' + fmtTime(rec.observedAt));
       lines.push('stale: ' + (rec.stale ? 'yes' : 'no'));
       lines.push('summary: ' + orUnknown(rec.summary));
