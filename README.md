@@ -108,9 +108,14 @@ never values from the file.
   search entry says `"skipped": "no_token"`, the report counts `skipped_searches`). Code search has its own rate limit
   (about 10 requests a minute), separate from the search limit, so either running out leaves the other kind going.
   A secondary limit on code search (a 403 or 429 with `retry-after`, or a 429 while requests are left) ends code
-  search only: the collector waits `retry-after` seconds when that is at most 10 and asks once more (that request
-  counts in the budget), and otherwise, or when the limit comes again, marks the code searches incomplete and goes on
-  with the repository searches and fetches. A secondary limit anywhere else still stops the run.
+  search only, after up to two retries of the same request (three attempts in all). Before the first retry the
+  collector waits `retry-after` seconds, or 5 seconds when the answer has none; before the second it waits the larger
+  of the new `retry-after` and twice the first wait, plus up to 1 second of random jitter. No single wait is longer
+  than 30 seconds: a `retry-after` above 30 is not waited for, and the code search gives up at once. All code search
+  waits of one run together stay within 60 seconds; a wait that would pass that is not made. Each retry counts in
+  the request budget and is logged like any other request, and when the budget is spent nothing is waited for. When
+  the collector gives up, it marks that code search and the later ones incomplete and goes on with the repository
+  searches and fetches. A secondary limit anywhere else still stops the run.
   Repository search items carry no README text: a query with `in:readme` cannot use `require_any` and stays a plain
   string.
 - `roots`: `{"repository_id", "full_name"}` repositories whose fork network is walked.
@@ -196,10 +201,12 @@ A run makes at most 801 requests, and four runs a day make at most 3,204. Schedu
 never overlap, so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
 by hand adds up to 801 more, and the collector stops when it reaches a rate limit.
 
-Not verified yet: the first live run on the Actions token met a code search secondary limit on its first code
-search request (429, `retry-after: 2`). The single wait and retry is meant for that, but the limit may recur on the
-Actions token; the next run shows. If it does, the code search entry is incomplete and the rest of the run is
-published.
+Code search on the Actions token: its secondary limit is observed, not documented. GitHub publishes no figure for
+the built-in token, so the collector's handling follows what live runs showed. The first code search request
+answered 429 with `retry-after: 2` in one run and `retry-after: 12` in the next, with 10 code search requests left
+both times. The collector now waits up to 30 seconds per retry, retries at most twice and waits at most 60 seconds
+in a run, which fits in the collect job's 45 minute timeout. When the limit persists, the code search entry is
+incomplete and the rest of the run is published.
 
 The first run finds no `feed-state` branch. It then starts from an empty state, so its feed is a baseline with no
 events. It pushes `feed-state` but does not deploy. After the first run, review `feed.json` on the `feed-state`

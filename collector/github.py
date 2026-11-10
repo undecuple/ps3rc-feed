@@ -31,13 +31,21 @@ remaining of 0 exhausts that bucket, and a request against an exhausted
 bucket raises RateLimited naming it before any transport call. A 403 or
 429 carrying retry-after, or a 429 while the bucket still has requests
 left, is a secondary limit and stops everything, with one exception: on
-GET /search/code (whose bucket is not at 0) it ends code search only. The
-client then waits retry-after seconds through its injectable `sleep` when
-that is at most MAX_CODE_SEARCH_WAIT, and asks the same URL once more (a
-second request against the budget, logged like any other); a missing or
-larger retry-after, or a second secondary limit, raises CodeSearchLimited
-and every later code search request is refused before the transport. No
-other path ever waits, and the client never forgets a recorded limit
+GET /search/code (whose bucket is not at 0) it ends code search only, after
+up to MAX_CODE_SEARCH_RETRIES retries of the same URL. Before retry 1 the
+client waits retry-after seconds (DEFAULT_CODE_SEARCH_WAIT when the header
+is absent or unusable); before retry 2 it waits the larger of the latest
+retry-after and twice the previous wait, plus a jitter of 0 to
+MAX_CODE_SEARCH_JITTER seconds (an injectable `jitter` function, default
+random.uniform(0, 1)). No wait exceeds MAX_CODE_SEARCH_WAIT: a
+retry-after above it is not waited for at all. All code search waits of a
+client together stay within MAX_CODE_SEARCH_WAIT_TOTAL; a wait that would
+pass it is not made. Waiting goes through the injectable `sleep`. Each
+retry is a request against the budget, logged like any other, and when the
+budget is spent nothing is waited for (BudgetExhausted, as for any
+request). When the client gives up, it raises CodeSearchLimited and every
+later code search request is refused before the transport. No other path
+ever waits, and the client never forgets a recorded limit
 within a run. Header values that are not bounded integers are ignored
 (unknown); duplicate headers keep the most restrictive value.
 
@@ -58,6 +66,7 @@ written only into the Authorization header handed to the transport.
 
 import http.client
 import json
+import random
 import re
 import ssl
 import threading
@@ -86,8 +95,18 @@ SEARCH = "search"
 # GET /search/code draws from its own bucket (about 10 requests a minute, token required).
 CODE_SEARCH = "code_search"
 CODE_SEARCH_PATH = "/search/code"
-# Longest retry-after (seconds) the client waits for before asking a code search once more.
-MAX_CODE_SEARCH_WAIT = 10
+# Code search secondary limits (see the module docstring). GitHub documents no figure for the
+# Actions GITHUB_TOKEN; live runs met 429 with retry-after 2 and 12 while 10 requests were left.
+# Longest single wait (seconds) before a code search is asked again; a longer retry-after is not waited for.
+MAX_CODE_SEARCH_WAIT = 30
+# Retries after the first answer (3 attempts in all).
+MAX_CODE_SEARCH_RETRIES = 2
+# The wait before retry 1 when the answer carries no usable retry-after.
+DEFAULT_CODE_SEARCH_WAIT = 5
+# Upper end of the jitter added to the wait before retry 2.
+MAX_CODE_SEARCH_JITTER = 1
+# All code search waits of one client (one run) together.
+MAX_CODE_SEARCH_WAIT_TOTAL = 60
 
 MAX_TOKEN_LENGTH = 4096
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]{1,%d}\Z" % MAX_TOKEN_LENGTH)
@@ -641,11 +660,15 @@ class LiveTransport:
         return body
 
 
+def _default_jitter():
+    return random.uniform(0, MAX_CODE_SEARCH_JITTER)
+
+
 # --- the client -------------------------------------------------------------
 
 
 class Client:
-    def __init__(self, transport, token=None, max_requests=100, page_caps=None, timeout=DEFAULT_TIMEOUT, max_body=MAX_BODY, sleep=None):
+    def __init__(self, transport, token=None, max_requests=100, page_caps=None, timeout=DEFAULT_TIMEOUT, max_body=MAX_BODY, sleep=None, jitter=None):
         if token is not None and not isinstance(token, Secret):
             raise TypeError("token must be a Secret")
         if not isinstance(max_requests, int) or isinstance(max_requests, bool) or max_requests < 1:
@@ -667,10 +690,13 @@ class Client:
         self.consecutive_failures = 0
         self.transport_failures = 0
         self.network_failed = False
-        # Code search secondary limits: the client is waiting-capable only here (tests pass a fake sleep).
+        # Code search secondary limits: the client is waiting-capable only here (tests pass a fake
+        # sleep and a fixed jitter).
         self._sleep = time.sleep if sleep is None else sleep
+        self._jitter = _default_jitter if jitter is None else jitter
         self.code_search_limited = False
         self.code_search_retries = 0
+        self.code_search_waited = 0
 
     @property
     def rate_limited(self):
@@ -706,6 +732,7 @@ class Client:
             "network_failed": self.network_failed,
             "code_search_limited": self.code_search_limited,
             "code_search_retries": self.code_search_retries,
+            "code_search_waited": self.code_search_waited,
             "authenticated": self.token is not None,
         }
 
@@ -717,26 +744,42 @@ class Client:
     def request(self, method, url, accept=ACCEPT_JSON):
         """GET an allowed URL. Returns Response; raises before the transport on any refusal or stop.
 
-        A code search secondary limit with retry-after at most
-        MAX_CODE_SEARCH_WAIT is waited out once and the URL asked again; see
-        the module docstring.
+        A code search secondary limit is waited out and the URL asked again,
+        at most MAX_CODE_SEARCH_RETRIES times; see the module docstring.
         """
-        try:
-            return self._request_once(method, url, accept)
-        except CodeSearchLimited as exc:
-            if not exc.answered or exc.retry_after is None or exc.retry_after > MAX_CODE_SEARCH_WAIT:
-                self.code_search_limited = True
-                raise
-            wait = exc.retry_after
-        if self.requests_made < self.max_requests:
-            # No wait when the retry cannot be asked: _request_once then raises BudgetExhausted.
-            self._sleep(min(wait, MAX_CODE_SEARCH_WAIT))
-            self.code_search_retries += 1
-        try:
-            return self._request_once(method, url, accept)
-        except CodeSearchLimited:
-            self.code_search_limited = True
-            raise
+        previous = None
+        retries = 0
+        while True:
+            try:
+                return self._request_once(method, url, accept)
+            except CodeSearchLimited as exc:
+                wait = None
+                if exc.answered and retries < MAX_CODE_SEARCH_RETRIES:
+                    wait = self._code_search_wait(exc.retry_after, previous)
+                if wait is None or self.code_search_waited + wait > MAX_CODE_SEARCH_WAIT_TOTAL:
+                    self.code_search_limited = True
+                    raise
+            retries += 1
+            previous = wait
+            if self.requests_made < self.max_requests:
+                # No wait when the retry cannot be asked: _request_once then raises BudgetExhausted.
+                self._sleep(wait)
+                self.code_search_waited += wait
+                self.code_search_retries += 1
+
+    def _code_search_wait(self, retry_after, previous):
+        """Seconds to wait before the next code search attempt, or None to give up.
+
+        `previous` is the wait before the last retry (None before retry 1).
+        """
+        if retry_after is None:
+            retry_after = DEFAULT_CODE_SEARCH_WAIT
+        if retry_after > MAX_CODE_SEARCH_WAIT:
+            return None
+        if previous is None:
+            return retry_after
+        jitter = min(max(float(self._jitter()), 0.0), float(MAX_CODE_SEARCH_JITTER))
+        return min(max(retry_after, 2 * previous) + jitter, MAX_CODE_SEARCH_WAIT)
 
     def _request_once(self, method, url, accept):
         if method != "GET":
@@ -816,7 +859,7 @@ class Client:
             self.retry_after = retry_after
         secondary = (response.status in (403, 429) and retry_after is not None) or (response.status == 429 and remaining != 0)
         if secondary and path == CODE_SEARCH_PATH and remaining != 0:
-            # Code search alone: the caller may wait and retry once; the run goes on either way.
+            # Code search alone: the caller may wait and retry; the run goes on either way.
             raise CodeSearchLimited("code search secondary rate limit at %s (status %d)" % (path, response.status), retry_after)
         if secondary:
             # A secondary limit (retry-after, or a 429 while the bucket still has requests left): everything stops.

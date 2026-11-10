@@ -18,9 +18,10 @@ Order of work in `collect`:
    like the search bucket but separately (code_search_rate_limited), so
    either running out leaves the other kind of search running. A
    secondary limit on code search (403/429 with retry-after, or a 429
-   while the bucket still has requests left) is waited out once when
-   retry-after is at most 10 seconds (github.Client); when it persists,
-   that code search is complete=false with a resume cursor, later code
+   while the bucket still has requests left) is waited out and retried
+   up to twice (github.Client: each wait at most 30 seconds, all waits of
+   a run at most 60 seconds, each retry counted in the budget); when it
+   persists, that code search is complete=false with a resume cursor, later code
    queries are not asked (resume cursor "page=1"), the report counts them
    in code_search_limited, and the repository searches, fork walks and
    fetches go on with `stopped` left null. Each item
@@ -819,7 +820,7 @@ def collect(client, config, run_at, last_attempted=None):
                 pages, failed = attempt(path, client.paginate, path, {"q": query, "per_page": PER_PAGE}, caps[SEARCH_CAPS[kind]], "object", "items")
             except _Stop as stop:
                 if stop.reason == CODE_SECONDARY and kind == "code":
-                    # Waited and retried once in the client, or not retryable, or refused before the
+                    # Waited and retried in the client, or not retryable, or refused before the
                     # transport because code search already met the limit: this search only is incomplete.
                     report["code_search_limited"] += 1
                     entry["resume_cursor"] = "page=1"

@@ -319,6 +319,8 @@ class RateLimitBuckets(CollectorTestCase):
 
 # The answer the first live run on the Actions token got for its first code search.
 CODE_SECONDARY = {"status": 429, "headers": {"retry-after": "2", "x-ratelimit-resource": "code_search", "x-ratelimit-remaining": "10"}, "body": {"message": "slow down"}}
+# The fixed jitter the tests inject: the wait before a second retry is max(retry-after, 2 x first wait) + 0.25.
+JITTER = 0.25
 
 
 def code_secondary(retry_after="2", status=429, remaining="10"):
@@ -328,29 +330,36 @@ def code_secondary(retry_after="2", status=429, remaining="10"):
     return {"status": status, "headers": headers, "body": {"message": "slow down"}}
 
 
+def code_ok(rid, full_name):
+    return ok({"total_count": 1, "incomplete_results": False, "items": [code_item(rid, full_name)]}, {"x-ratelimit-resource": "code_search"})
+
+
 class CodeSearchSecondaryLimit(CollectorTestCase):
-    """A secondary limit on /search/code: wait (fake sleep) and retry once, then give up on code search only."""
+    """A secondary limit on /search/code: wait (fake sleep, fixed jitter) and retry up to twice, then give up on code search only."""
 
     CONFIG = {"queries": ["first in:name", code_query(), "after in:name", code_query("filename:other.txt")], "roots": []}
+    OTHER = "filename:other.txt"
 
-    def routes(self, code_answers):
+    def routes(self, code_answers, other_answers=None):
         routes = {code_url(LICENCE): code_answers}
         routes.update(search("first in:name", [api_repo(12, "game-dev/port-b")]))
         routes.update(search("after in:name", [api_repo(13, "game-dev/port-c")]))
-        routes.update(code_search("filename:other.txt", [code_item(14, "game-dev/port-d")]))
+        routes.update(code_search(self.OTHER, [code_item(14, "game-dev/port-d")]))
+        if other_answers is not None:
+            routes[code_url(self.OTHER)] = other_answers
         for rid, name in ((11, "game-dev/port-a"), (12, "game-dev/port-b"), (13, "game-dev/port-c"), (14, "game-dev/port-d")):
             routes.update(fetch_routes(rid, name))
         return routes
 
-    def collect(self, code_answers, config=None, **kw):
+    def collect(self, code_answers, config=None, other_answers=None, jitter=JITTER, **kw):
         sleeps = []
-        run, report, client, paths = collect_code(config or self.CONFIG, self.routes(code_answers), sleep=sleeps.append, **kw)
+        run, report, client, paths = collect_code(config or self.CONFIG, self.routes(code_answers, other_answers), sleep=sleeps.append, jitter=lambda: jitter, **kw)
         return run, report, client, paths, sleeps
 
     def assertCodeSearchGivenUp(self, run, report, client, paths):
         self.assertEqual(run["searches"][1], {"query": LICENCE, "complete": False, "repository_ids": [], "kind": "code", "resume_cursor": "page=1"})
         # The later code query is not asked; the repository search after it is.
-        self.assertEqual(run["searches"][3], {"query": "filename:other.txt", "complete": False, "repository_ids": [], "kind": "code", "resume_cursor": "page=1"})
+        self.assertEqual(run["searches"][3], {"query": self.OTHER, "complete": False, "repository_ids": [], "kind": "code", "resume_cursor": "page=1"})
         self.assertEqual([s["complete"] for s in run["searches"]], [True, False, True, False])
         self.assertEqual(paths.count("/search/repositories"), 2)
         self.assertEqual([r["repository_id"] for r in run["repositories"]], [12, 13])
@@ -368,17 +377,21 @@ class CodeSearchSecondaryLimit(CollectorTestCase):
         state, _ = run_runs([run])
         self.assertIn(LICENCE, state["collection"]["incomplete_searches"])
 
-    def test_the_retry_succeeds(self):
-        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, ok({"total_count": 1, "incomplete_results": False, "items": [code_item(11, "game-dev/port-a")]}, {"x-ratelimit-resource": "code_search"})])
-        self.assertEqual(sleeps, [2])
+    def assertCodeSearchDone(self, run, report, client):
         self.assertEqual(run["searches"][1], {"query": LICENCE, "complete": True, "repository_ids": [11], "kind": "code"})
         self.assertEqual(run["searches"][3]["repository_ids"], [14])
         self.assertEqual([r["repository_id"] for r in run["repositories"]], [11, 12, 13, 14])
         self.assertIsNone(run["collection_report"]["stopped"])
         self.assertIs(run["collection_report"]["complete"], True)
         self.assertEqual(report["code_search_limited"], 0)
-        self.assertEqual(client.code_search_retries, 1)
         self.assertIs(client.code_search_limited, False)
+
+    def test_the_first_retry_succeeds(self):
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, code_ok(11, "game-dev/port-a")])
+        self.assertEqual(sleeps, [2])
+        self.assertCodeSearchDone(run, report, client)
+        self.assertEqual((client.code_search_retries, client.code_search_waited), (1, 2))
+        self.assertEqual(client.summary()["code_search_waited"], 2)
         # The request log shows both attempts, the same URL twice, then the next search.
         code_query_string = code_url(LICENCE).split("?", 1)[1]
         self.assertEqual(client.log[1:4], [
@@ -388,46 +401,132 @@ class CodeSearchSecondaryLimit(CollectorTestCase):
         ])
         self.assertEqual(run["collection_report"]["requests_made"], 4 + 4 * 4 + 1)
 
-    def test_the_retry_fails(self):
-        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY])
-        self.assertEqual(sleeps, [2])
-        self.assertEqual(paths[:4], ["/search/repositories", "/search/code", "/search/code", "/search/repositories"])
-        self.assertEqual(paths.count("/search/code"), 2)
-        self.assertEqual(client.code_search_retries, 1)
-        self.assertEqual(run["collection_report"]["requests_made"], 3 + 1 + 2 * 4)
+    def test_the_second_retry_succeeds(self):
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY, code_ok(11, "game-dev/port-a")])
+        # Before retry 2: max(retry-after 2, 2 x 2) plus the jitter.
+        self.assertEqual(sleeps, [2, 4 + JITTER])
+        self.assertCodeSearchDone(run, report, client)
+        self.assertEqual((client.code_search_retries, client.code_search_waited), (2, 6 + JITTER))
+        # The request log shows all three attempts, the same URL each time, then the next search.
+        code_query_string = code_url(LICENCE).split("?", 1)[1]
+        self.assertEqual(client.log[1:5], [{"method": "GET", "path": "/search/code", "query": code_query_string}] * 3 + [
+            {"method": "GET", "path": "/search/repositories", "query": search_url("after in:name").split("?", 1)[1]},
+        ])
+        self.assertEqual(run["collection_report"]["requests_made"], 5 + 4 * 4 + 1)
+
+    def test_both_retries_fail(self):
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY, CODE_SECONDARY, code_ok(11, "game-dev/port-a")])
+        self.assertEqual(sleeps, [2, 4 + JITTER])
+        self.assertEqual(paths[:5], ["/search/repositories", "/search/code", "/search/code", "/search/code", "/search/repositories"])
+        # No fourth attempt, though the next answer would be a success.
+        self.assertEqual(paths.count("/search/code"), 3)
+        self.assertEqual(client.code_search_retries, 2)
+        self.assertEqual(run["collection_report"]["requests_made"], 3 + 2 + 2 * 4)
         self.assertCodeSearchGivenUp(run, report, client, paths)
 
     def test_a_403_with_retry_after_is_retried_too(self):
-        run, report, client, paths, sleeps = self.collect([code_secondary(status=403), code_secondary(status=403)])
-        self.assertEqual(sleeps, [2])
+        run, report, client, paths, sleeps = self.collect([code_secondary(status=403)] * 3)
+        self.assertEqual(sleeps, [2, 4 + JITTER])
         self.assertCodeSearchGivenUp(run, report, client, paths)
 
-    def test_a_retry_after_over_10_seconds_is_not_waited_for(self):
-        run, report, client, paths, sleeps = self.collect([code_secondary("11"), CODE_SECONDARY])
+    def test_a_retry_after_up_to_30_seconds_is_waited_for(self):
+        # The second live run on the Actions token got retry-after 12.
+        run, report, client, paths, sleeps = self.collect([code_secondary("12"), code_ok(11, "game-dev/port-a")])
+        self.assertEqual(sleeps, [12])
+        self.assertCodeSearchDone(run, report, client)
+        run, report, client, paths, sleeps = self.collect([code_secondary("30"), code_ok(11, "game-dev/port-a")])
+        self.assertEqual(sleeps, [30])
+        self.assertCodeSearchDone(run, report, client)
+
+    def test_a_retry_after_over_30_seconds_is_not_waited_for(self):
+        run, report, client, paths, sleeps = self.collect([code_secondary("31"), code_ok(11, "game-dev/port-a")])
         self.assertEqual(sleeps, [])
         self.assertEqual(paths.count("/search/code"), 1)
         self.assertEqual(client.code_search_retries, 0)
         self.assertCodeSearchGivenUp(run, report, client, paths)
-        # 10 seconds is still waited for.
-        run, _, client, paths, sleeps = self.collect([code_secondary("10"), CODE_SECONDARY])
-        self.assertEqual((sleeps, paths.count("/search/code")), ([10], 2))
+        # Nor on the second answer: one wait, then give up.
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, code_secondary("31"), code_ok(11, "game-dev/port-a")])
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(paths.count("/search/code"), 2)
+        self.assertCodeSearchGivenUp(run, report, client, paths)
 
-    def test_a_429_without_retry_after_is_not_retried(self):
+    def test_the_second_wait_follows_the_larger_of_retry_after_and_doubling(self):
+        for answers, expected in (
+            ([code_secondary("2"), code_secondary("10")], [2, 10 + JITTER]),
+            ([code_secondary("12"), code_secondary("2")], [12, 24 + JITTER]),
+            # Doubling past 30 is capped at 30, jitter included.
+            ([code_secondary("20"), code_secondary("2")], [20, 30]),
+            ([code_secondary("15"), code_secondary("2")], [15, 30]),
+        ):
+            with self.subTest(answers=[a["headers"]["retry-after"] for a in answers]):
+                run, report, client, paths, sleeps = self.collect(answers + [code_ok(11, "game-dev/port-a")])
+                self.assertEqual(sleeps, expected)
+                self.assertCodeSearchDone(run, report, client)
+
+    def test_a_missing_retry_after_waits_5_seconds(self):
         for garbled in (None, "soon"):
             with self.subTest(retry_after=garbled):
-                run, report, client, paths, sleeps = self.collect([code_secondary(garbled), CODE_SECONDARY])
-                self.assertEqual(sleeps, [])
-                self.assertEqual(paths.count("/search/code"), 1)
+                run, report, client, paths, sleeps = self.collect([code_secondary(garbled), code_ok(11, "game-dev/port-a")])
+                self.assertEqual(sleeps, [5])
+                self.assertCodeSearchDone(run, report, client)
+                # Missing again on the second answer: max(5, 2 x 5) plus the jitter.
+                run, report, client, paths, sleeps = self.collect([code_secondary(garbled)] * 3)
+                self.assertEqual(sleeps, [5, 10 + JITTER])
+                self.assertEqual(paths.count("/search/code"), 3)
                 self.assertCodeSearchGivenUp(run, report, client, paths)
 
-    def test_the_retry_counts_toward_the_budget(self):
-        # Budget 3: first search, the code search and its retry; the run then stops on the budget.
-        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY], max_requests=3)
+    def test_the_jitter_comes_from_the_injected_function(self):
+        from collector import github
+
+        for jitter, added in ((0.75, 0.75), (0, 0), (5, 1), (-1, 0)):
+            with self.subTest(jitter=jitter):
+                _, _, _, _, sleeps = self.collect([CODE_SECONDARY] * 3, jitter=jitter)
+                self.assertEqual(sleeps, [2, 4 + added])
+        client, _ = make_client({})
+        self.assertIs(client._jitter, github._default_jitter)
+        values = [github._default_jitter() for _ in range(200)]
+        self.assertTrue(all(0 <= v <= github.MAX_CODE_SEARCH_JITTER for v in values))
+        self.assertGreater(len(set(values)), 1)
+
+    def test_all_code_search_waits_of_a_run_stay_within_60_seconds(self):
+        from collector import github
+
+        self.assertEqual((github.MAX_CODE_SEARCH_WAIT, github.MAX_CODE_SEARCH_RETRIES, github.DEFAULT_CODE_SEARCH_WAIT, github.MAX_CODE_SEARCH_WAIT_TOTAL), (30, 2, 5, 60))
+        first = [code_secondary("20"), code_secondary("2"), code_ok(11, "game-dev/port-a")]
+        # 20 + 30 = 50 waited; the other query's 12 would pass 60: not waited for, that query only is incomplete.
+        run, report, client, paths, sleeps = self.collect(first, other_answers=[code_secondary("12"), code_ok(14, "game-dev/port-d")])
+        self.assertEqual(sleeps, [20, 30])
+        self.assertEqual(client.code_search_waited, 50)
+        self.assertEqual(paths.count("/search/code"), 4)
+        self.assertEqual(run["searches"][1]["repository_ids"], [11])
+        self.assertEqual(run["searches"][3], {"query": self.OTHER, "complete": False, "repository_ids": [], "kind": "code", "resume_cursor": "page=1"})
+        self.assertEqual(report["code_search_limited"], 1)
+        self.assertIsNone(run["collection_report"]["stopped"])
+        self.assertEqual([r["repository_id"] for r in run["repositories"]], [11, 12, 13])
+        # Exactly 60 is allowed.
+        run, report, client, paths, sleeps = self.collect(first, other_answers=[code_secondary("10"), code_ok(14, "game-dev/port-d")])
+        self.assertEqual(sleeps, [20, 30, 10])
+        self.assertEqual(report["code_search_limited"], 0)
+        # The bound also stops a second retry: 50 + 5 waited, the next 10.25 would pass 60.
+        run, report, client, paths, sleeps = self.collect(first, other_answers=[code_secondary("5")] * 2 + [code_ok(14, "game-dev/port-d")])
+        self.assertEqual(sleeps, [20, 30, 5])
+        self.assertEqual(paths.count("/search/code"), 5)
+        self.assertEqual(report["code_search_limited"], 1)
+
+    def test_every_retry_counts_toward_the_budget(self):
+        # Budget 4: first search, the code search and both retries; the run then stops on the budget.
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY] * 3, max_requests=4)
+        self.assertEqual(paths, ["/search/repositories", "/search/code", "/search/code", "/search/code"])
+        self.assertEqual(sleeps, [2, 4 + JITTER])
+        self.assertEqual(run["collection_report"]["stopped"], "budget")
+        # Budget 3: the second retry cannot be asked, so it is not waited for.
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY] * 3, max_requests=3)
         self.assertEqual(paths, ["/search/repositories", "/search/code", "/search/code"])
         self.assertEqual(sleeps, [2])
+        self.assertEqual(client.code_search_retries, 1)
         self.assertEqual(run["collection_report"]["stopped"], "budget")
-        # Budget 2: the retry cannot be asked, so nothing is waited for.
-        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY], max_requests=2)
+        # Budget 2: no retry can be asked, so nothing is waited for.
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY] * 3, max_requests=2)
         self.assertEqual(paths, ["/search/repositories", "/search/code"])
         self.assertEqual(sleeps, [])
         self.assertEqual(run["collection_report"]["stopped"], "budget")
@@ -435,16 +534,16 @@ class CodeSearchSecondaryLimit(CollectorTestCase):
     def test_a_limit_on_a_later_code_page_keeps_the_first_page(self):
         link = '<https://api.github.com/search/code?page=2&per_page=100&q=filename%3Alicence-file.txt>; rel="next"'
         first = ok({"total_count": 2, "incomplete_results": False, "items": [code_item(11, "game-dev/port-a")]}, {"link": link, "x-ratelimit-resource": "code_search"})
-        routes = {code_url(LICENCE): first, code_url(LICENCE, 2): [CODE_SECONDARY, CODE_SECONDARY]}
+        routes = {code_url(LICENCE): first, code_url(LICENCE, 2): [CODE_SECONDARY] * 3}
         routes.update(search("after in:name", [api_repo(13, "game-dev/port-c")]))
         for rid, name in ((11, "game-dev/port-a"), (13, "game-dev/port-c")):
             routes.update(fetch_routes(rid, name))
         sleeps = []
         config = {"queries": [code_query(), "after in:name"], "roots": [], "page_caps": {"code": 2, "search": 10}}
-        run, report, client, paths = collect_code(config, routes, sleep=sleeps.append)
-        self.assertEqual(sleeps, [2])
+        run, report, client, paths = collect_code(config, routes, sleep=sleeps.append, jitter=lambda: JITTER)
+        self.assertEqual(sleeps, [2, 4 + JITTER])
         self.assertEqual(run["searches"][0], {"query": LICENCE, "complete": False, "repository_ids": [11], "kind": "code", "resume_cursor": "page=2"})
-        self.assertEqual(paths[:4], ["/search/code", "/search/code", "/search/code", "/search/repositories"])
+        self.assertEqual(paths[:5], ["/search/code"] * 4 + ["/search/repositories"])
         self.assertEqual([r["repository_id"] for r in run["repositories"]], [11, 13])
         self.assertIsNone(run["collection_report"]["stopped"])
         self.assertEqual(report["code_search_limited"], 1)
@@ -468,7 +567,6 @@ class CodeSearchSecondaryLimit(CollectorTestCase):
                 self.assertEqual(paths[-1], label)
 
     def test_remaining_zero_on_code_search_keeps_the_bucket_rule(self):
-        sleeps = []
         run, report, client, paths, sleeps = self.collect([dict(CODE_LIMITED, status=429), CODE_SECONDARY])
         self.assertEqual(sleeps, [])
         self.assertEqual(paths.count("/search/code"), 1)
@@ -480,11 +578,11 @@ class CodeSearchSecondaryLimit(CollectorTestCase):
         from collector import github
 
         sleeps = []
-        client, transport = make_client({code_url(LICENCE): [CODE_SECONDARY, CODE_SECONDARY]}, sleep=sleeps.append)
+        client, transport = make_client({code_url(LICENCE): [CODE_SECONDARY]}, sleep=sleeps.append, jitter=lambda: JITTER)
         for _ in range(2):
             with self.assertRaises(github.CodeSearchLimited):
                 client.get("/search/code", {"q": LICENCE, "per_page": 100, "page": 1})
-        self.assertEqual((len(transport.calls), sleeps), (2, [2]))
+        self.assertEqual((len(transport.calls), sleeps), (3, [2, 4 + JITTER]))
         self.assertIs(client.rate_limited, False)
         self.assertEqual(github._stop_reason(github.CodeSearchLimited("x")), "code_search_secondary_limited")
         self.assertIs(github.Client(transport)._sleep, time.sleep)
