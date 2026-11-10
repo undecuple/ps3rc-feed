@@ -18,6 +18,8 @@ Browser check (headless Chromium, local only): `sh tools/browser_check.sh`. It s
 
 When a view has no rows, `emptyMessage` in `terminal.js` picks the text: a feed with repositories but no events (as after a first collection) says so and points to the table and forks views; otherwise it is `Nothing here yet.`, or `No rows match the current filters.` when filters hide every row.
 
+When a search leaves the feed, table, forks or recent view empty, a link under that message opens GitHub's own repository search for the same text in a new tab. `githubSearchUrl` in `terminal.js` builds the link, and the page itself makes no request for it.
+
 The `recent` view (or `view recent`) lists repositories by the time this collector first saw them, from each repository's `first_seen_at`. Ties go to more stars, then to the repository name. Entering the view with the default sort (`-time`) switches to `-first-seen`; a sort you picked yourself is kept. Filters, search and the untouched forks setting work as in the table. Repositories found in a baseline collection share one time, and that time is not when a repository was created. The browser check opens this view on both served copies at desktop and phone width.
 
 Type `help` at the prompt for the commands.

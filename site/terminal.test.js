@@ -618,3 +618,50 @@ test('recent view note is plain text and the page builds the view from it', () =
   assert.ok(/state\.view === 'recent' \? T\.sortRecent : T\.sortRecords/.test(app));
   assert.ok(!/innerHTML/.test(app));
 });
+
+test('github search link: encoded query, fixed prefix, null for empty, too long or control characters', () => {
+  const P = 'https://github.com/search?q=';
+  const S = '&type=repositories';
+  const cases = [
+    ['killzone', P + 'killzone' + S],
+    ['  killzone 3  ', P + 'killzone%203' + S],
+    ['a b', P + 'a%20b' + S],
+    ['a&type=users', P + 'a%26type%3Dusers' + S],
+    ['say "hi" it\'s', P + 'say%20%22hi%22%20it%27s' + S],
+    ['<script>x</script>', P + '%3Cscript%3Ex%3C%2Fscript%3E' + S],
+    ['ゲーム ü', P + '%E3%82%B2%E3%83%BC%E3%83%A0%20%C3%BC' + S],
+    ['🎮 port', P + '%F0%9F%8E%AE%20port' + S],
+    ['100% done', P + '100%25%20done' + S],
+    ['a#b?c/d+e', P + 'a%23b%3Fc%2Fd%2Be' + S],
+    ['x'.repeat(100), P + 'x'.repeat(100) + S],
+    ['  ' + 'x'.repeat(100) + '  ', P + 'x'.repeat(100) + S],
+  ];
+  for (const [text, want] of cases) assert.equal(T.githubSearchUrl(text), want, JSON.stringify(text));
+  for (const bad of ['', '   ', '\t \n', 'x'.repeat(101), 'a\u0000b', 'a\tb', 'line\nbreak', 'a\u001bb', 'a\u007fb', 'a\u0085b', ' x\n', '\ud83c', null, undefined, 42]) {
+    assert.equal(T.githubSearchUrl(bad), null, JSON.stringify(bad));
+  }
+  // the query part never holds raw spaces, quotes, angle brackets or ampersands, whatever is typed
+  for (const text of [' a b ', '"\'<>&', 'x&y=z "q" <b>', '🎮&🎮', '%20 %', 'a'.repeat(99) + '&']) {
+    const u = T.githubSearchUrl(text);
+    assert.ok(u.startsWith(P) && u.endsWith(S), text);
+    assert.ok(!/[ "'<>&]/.test(u.slice(P.length, -S.length)), text);
+    assert.equal(decodeURIComponent(u.slice(P.length, -S.length)), text.trim());
+    assert.equal(T.safeGithubUrl(u), u);
+  }
+  assert.equal(T.NO_MATCH_NOTE, 'Not in this list? Our data comes from scheduled collections and may be missing repositories.');
+});
+
+test('the page builds the github search link from githubSearchUrl as text, never innerHTML', () => {
+  const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
+  const start = app.indexOf('function githubSearchLink(');
+  assert.ok(start > 0);
+  const body = app.slice(start, app.indexOf('\n  }\n', start));
+  assert.ok(/const href = T\.githubSearchUrl\(search\);/.test(body));
+  assert.ok(/a\.href = href;/.test(body) && /a\.target = '_blank';/.test(body) && /a\.rel = 'noopener noreferrer';/.test(body));
+  assert.ok(/el\('a', null, 'Search GitHub for "' \+ shownText \+ '"'\)/.test(body));
+  assert.ok(/el\('p', null, T\.NO_MATCH_NOTE\)/.test(body));
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(app));
+  // it sits under the empty message, and only there
+  assert.ok(/T\.emptyMessage\(state\.view, all\.length, recs\.repos\.length\)\)\);\n\s*const more = githubSearchLink\(state\.search\);\n\s*if \(more\) box\.append\(more\);/.test(app));
+  assert.equal((app.match(/githubSearchLink\(/g) || []).length, 2);
+});

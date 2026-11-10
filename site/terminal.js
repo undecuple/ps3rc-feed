@@ -190,6 +190,23 @@
     return u.href;
   }
 
+  // Link to GitHub's own repository search for text typed at the prompt. null when there is nothing to search,
+  // the text is over MAX_SEARCH characters or holds control characters. Single quotes are encoded too, so the
+  // query holds no raw quote of either kind. The page makes no request for it.
+  const GITHUB_SEARCH = 'https://github.com/search?q=';
+  function githubSearchUrl(text) {
+    if (typeof text !== 'string' || /[\u0000-\u001f\u007f-\u009f]/.test(text)) return null;
+    const t = text.trim();
+    if (!t || t.length > MAX_SEARCH) return null;
+    try {
+      return GITHUB_SEARCH + encodeURIComponent(t).replace(/'/g, '%27') + '&type=repositories';
+    } catch (e) {
+      return null; // a lone surrogate cannot be encoded
+    }
+  }
+
+  const NO_MATCH_NOTE = 'Not in this list? Our data comes from scheduled collections and may be missing repositories.';
+
   // ---------- data ----------
 
   function typeLabel(id) {
@@ -808,6 +825,6 @@
     deriveStatus, joinData, matches, dropUntouched, sortRecords, groupRecords, execute, complete,
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
     orUnknown, gameLabel, eventTime, compareLabel, noticeText, collectionState, feedStale,
-    emptyMessage, sortRecent, RECENT_NOTE,
+    emptyMessage, sortRecent, RECENT_NOTE, githubSearchUrl, NO_MATCH_NOTE,
   };
 });
