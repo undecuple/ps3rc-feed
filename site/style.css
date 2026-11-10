@@ -121,7 +121,7 @@ button, input { font: inherit; color: inherit; }
 .feed li.head { color: var(--dim); padding: 6px 8px 2px; }
 .row {
   display: grid;
-  grid-template-columns: 12ch 10ch 16ch 30ch 1fr;
+  grid-template-columns: 12ch 10ch 16ch 30ch 8ch 1fr;
   gap: 0 10px;
   width: 100%;
   background: transparent;
@@ -132,10 +132,11 @@ button, input { font: inherit; color: inherit; }
 }
 .row:hover { background: var(--hover); }
 /* Column headings stay at the top of the scrolling list. */
-.colhead { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 12ch 10ch 16ch 30ch 1fr; gap: 0 10px; padding: 4px 8px; background: var(--bar); border-bottom: 1px solid var(--line); color: var(--dim); }
+.colhead { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 12ch 10ch 16ch 30ch 8ch 1fr; gap: 0 10px; padding: 4px 8px; background: var(--bar); border-bottom: 1px solid var(--line); color: var(--dim); }
 .row span { overflow-wrap: anywhere; min-width: 0; }
 .row .label { font-weight: 600; color: var(--accent); }
 .row .sum { color: var(--dim); }
+.row .stars, .colhead .stars { text-align: right; }
 
 table { border-collapse: collapse; width: 100%; min-width: 760px; }
 th, td { text-align: left; padding: 2px 8px; vertical-align: top; }
@@ -171,6 +172,8 @@ caption { text-align: left; padding: 4px 8px; color: var(--dim); }
 @media (max-width: 760px) {
   .row { grid-template-columns: auto 1fr; gap: 0 10px; }
   .row .sum { grid-column: 1 / -1; padding-left: 2ch; }
+  .row .stars { grid-column: 1 / -1; padding-left: 2ch; text-align: left; color: var(--dim); }
+  .row .stars::before { content: "stars "; }
   .row .game, .row .repo { grid-column: 1 / -1; }
   .colhead { display: none; }
   .view { max-height: 60vh; }
