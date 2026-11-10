@@ -14,6 +14,10 @@ name: refresh
 # feed lists no repositories; publish-state and deploy then do not run, so nothing is pushed or deployed.
 # A first run (no feed-state branch yet) pushes feed-state but does not deploy: the page is deployed by hand
 # with the pages workflow after the feed has been reviewed.
+#
+# History: publish-history appends each publishable run (the first one too) to the feed-history branch with
+# normal commits and fast-forward pushes only (docs/history.md). It runs beside publish-state and deploy, which
+# do not wait for it, so a failure there blocks neither.
 
 on:
   schedule:
@@ -219,6 +223,89 @@ jobs:
           export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
           git push -q --force "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-state
           echo "feed-state updated"
+
+  publish-history:
+    # Appends the run to the feed-history branch. Never a force push: a branch that moved meanwhile fails the push.
+    needs: collect
+    if: vars.REFRESH_ENABLED == 'true' && (needs.collect.outputs.stopped == '' || needs.collect.outputs.stopped == 'budget') && needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Look for the feed-history branch
+        id: history
+        run: |
+          # Exit 2 means the branch does not exist; any other failure stops the job,
+          # so a network error never starts a new branch.
+          rc=0
+          git ls-remote --exit-code --heads origin refs/heads/feed-history > /dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "feed-history branch found"
+          elif [ "$rc" -eq 2 ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "no feed-history branch: it is started with this run"
+          else
+            echo "could not list the remote branches (exit $rc)"
+            exit 1
+          fi
+      - if: steps.history.outputs.exists == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feed-history
+          path: data/history
+          persist-credentials: false
+      - name: Start the feed-history branch
+        if: steps.history.outputs.exists == 'false'
+        run: |
+          mkdir -p data/history
+          git init -q -b feed-history data/history
+      - name: Download the feed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECT_VERSION: ${{ needs.collect.outputs.version }}
+        run: |
+          work="$RUNNER_TEMP/feed-history"
+          mkdir -p "$work/artifact" "$work/check" data/feed
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name feed-data --dir "$work/artifact"
+          tar -xf "$work/artifact/artifact.tar" -C data/feed
+          # The check publish-state makes: feed.json must match the manifest version from the collect job,
+          # and must not be under half the size of the committed feed.
+          cp site/data/feed.json "$work/check/feed.json"
+          python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" \
+            data/feed "$work/check"
+      - name: Update the history
+        run: python3 -B -m collector history --feed data/feed/feed.json --history-dir data/history
+      - name: Push to the feed-history branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd data/history
+          git add -A
+          if git diff --cached --quiet; then
+            echo "the history is unchanged; nothing to push"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898299+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "History for run $GITHUB_RUN_ID"
+          # The credential reaches git through environment config, never the remote URL or a command line.
+          basic=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
+          # A plain push: a branch that moved since the checkout is not a fast-forward, and the push fails.
+          git push -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-history
+          echo "feed-history updated"
 
   deploy:
     # Deploys what publish-state pushed, so the page never shows a feed the saved state does not hold.

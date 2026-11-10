@@ -1,9 +1,9 @@
 """ps3rc-feed collector: run files, observations, events, catalog, and a read-only GitHub client.
 
 Standard library only. `schema`, `store`, `events`, `forks`, `catalog`,
-`export` and `text` never touch the network: they turn run files (what a
-fetch returned) into persisted observations, canonical events, a catalog
-and the static site's feed.json and manifest.json. `github` holds the
+`export`, `history` and `text` never touch the network: they turn run files
+(what a fetch returned) into persisted observations, canonical events, a
+catalog, the static site's feed.json and manifest.json, and the feed history. `github` holds the
 only code that can open a connection (its
 LiveTransport, HTTPS GET to api.github.com), `collect` drives it into the
 run format, and `cli` constructs the live transport only when asked to
@@ -19,4 +19,4 @@ import sys
 
 sys.dont_write_bytecode = True
 
-__all__ = ["catalog", "cli", "collect", "events", "export", "forks", "github", "model", "paths", "schema", "store", "text"]
+__all__ = ["catalog", "cli", "collect", "events", "export", "forks", "github", "history", "model", "paths", "schema", "store", "text"]

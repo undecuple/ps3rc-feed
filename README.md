@@ -39,6 +39,7 @@ real time, and the page shows its own collection time. The last collection may b
   is labelled inherited and unverified.
 - **Export:** `export` turns run files into the `feed.json` and `manifest.json` the page reads, and can keep its state
   between runs. See [docs/export.md](docs/export.md).
+- **History:** `history` appends each published feed to the `feed-history` branch. See [docs/history.md](docs/history.md).
 - **Tests:** offline unit tests in `tests/` run in CI. They block network access.
 
 Not built yet: RSS and Discord feeds.
@@ -196,6 +197,8 @@ When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand fr
    one commit. Run files are never committed. A feed with under half the repositories of the committed
    `site/data/feed.json` is refused.
 5. Runs the site tests and deploys the page with the new feed, except after a first run.
+6. Adds the run to the `feed-history` branch, on a first run too. This job runs beside steps 4 and 5, and its
+   failure does not stop them.
 
 A run makes at most 801 requests, and four runs a day make at most 3,204. Scheduled runs start 6 hours apart and
 never overlap, so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
@@ -213,6 +216,14 @@ events. It pushes `feed-state` but does not deploy. After the first run, review 
 branch, then deploy it by starting the `pages` workflow by hand (Actions tab, `pages`, Run workflow); that workflow
 serves the `feed-state` feed when it passes the same checks. A push to `main` deploys the page with the feed from `feed-state` when that feed matches its manifest, and
 with the committed `site/data/` otherwise.
+
+## History
+
+The `feed-history` branch keeps every event the feed has shown. It also keeps each change of a repository's name,
+stars, commits in the last 30 days, category, archived and fork flags, and last commit time. It has one file per
+month. History is written only when the scheduled refresh runs. The `history` command adds a feed to it, and the
+refresh job pushes the result with normal commits. The format, the size limits and the rotation rules are in
+[docs/history.md](docs/history.md).
 
 ## How AI was used
 

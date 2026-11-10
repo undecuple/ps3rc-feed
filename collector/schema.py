@@ -369,6 +369,25 @@ def read_json(path):
             raise SchemaError("%s: nested too deeply" % path) from None
 
 
+def loads(text, where):
+    """read_json for one JSON text already in memory (a history line); `where` names it in error messages."""
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_pairs_hook,
+            parse_constant=_reject_constant,
+            parse_float=_reject_float,
+        )
+    except json.JSONDecodeError:
+        raise SchemaError("%s: not valid JSON" % where) from None
+    except ValueError as exc:
+        if isinstance(exc, SchemaError):
+            raise SchemaError("%s: %s" % (where, exc)) from None
+        raise SchemaError("%s: unreadable number" % where) from None
+    except RecursionError:
+        raise SchemaError("%s: nested too deeply" % where) from None
+
+
 # --- run files (what a fetch returned) ---------------------------------
 
 TIMESTAMP = Timestamp()
