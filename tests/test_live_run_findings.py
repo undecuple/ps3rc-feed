@@ -242,19 +242,98 @@ class B_PerResourceRateLimits(CollectorTestCase):
 
 
 class C_EmptyRepositories(CollectorTestCase):
-    def test_409_on_commits_is_an_empty_complete_listing(self):
+    @staticmethod
+    def routes_with_409():
         routes = routes_for_network()
         routes[SKY_COMMITS_P1] = {"status": 409, "headers": {"x-ratelimit-remaining": "4000"}, "body": {"message": "Git Repository is empty."}}
-        run, report, _, _ = collect_with(routes)
+        return routes
+
+    def test_409_on_commits_is_an_empty_listing_not_known_to_be_complete(self):
+        # A 409 also means "temporarily unavailable": zero commits is not certain.
+        run, report, _, _ = collect_with(self.routes_with_409())
         r100 = repo_100(run)
         self.assertEqual(r100["commits"], [])
-        self.assertIs(r100["commits_complete"], True)
+        self.assertIs(r100["commits_complete"], False)
         self.assertEqual(r100["fetch_state"], "ok")
+
+    def test_409_on_commits_is_not_an_error(self):
+        run, report, _, _ = collect_with(self.routes_with_409())
         self.assertEqual(report["errors"], [])
         self.assertEqual(report["error_count"], 0)
+        self.assertEqual(run["collection_report"]["error_count"], 0)
+        self.assertIsNone(run["collection_report"]["stopped"])
+
+    def test_409_on_commits_is_counted_and_does_not_make_the_run_incomplete(self):
+        # A truly empty repository answers 409 on every run: it must not keep every run incomplete.
+        from collector import catalog
+
+        baseline, _, _, _ = collect_with(routes_for_network())
+        self.assertIs(baseline["collection_report"]["complete"], True)
+        self.assertEqual(baseline["collection_report"]["commits_unavailable"], 0)
+        run, report, _, _ = collect_with(self.routes_with_409())
+        self.assertEqual(run["collection_report"]["commits_unavailable"], 1)
+        self.assertIs(report["complete"], True)
         self.assertIs(run["collection_report"]["complete"], True)
         state, _ = run_runs([run])
-        self.assertIs(state["repositories"]["100"]["partial"], False)
+        obs = state["repositories"]["100"]
+        self.assertIs(obs["partial"], False)
+        self.assertIs(obs["commits_complete"], False)
+        self.assertIs(state["collection"]["last_run"]["complete"], True)
+        # The repository's own listing is still shown as incomplete.
+        self.assertIn(100, catalog.collection_status(state)["partial_commits"])
+
+    def test_any_other_incomplete_commits_listing_still_makes_the_run_incomplete(self):
+        # 409 on repository 90, a page cap on repository 100: only the 409 is excused.
+        routes = self.routes_with_409()
+        routes[SKY_COMMITS_P1] = ok(
+            [api_commit(0xB, "2026-11-04T12:00:00Z")],
+            {"link": "<https://api.github.com/repos/game-org/skyfall-recomp/commits?" + ID_LINK_QUERY + '>; rel="next"'},
+        )
+        routes["GET /repos/frame-org/ps3recomp-example/commits?page=1&per_page=100&sha=main&since=" + SINCE] = {"status": 409, "headers": {}, "body": {}}
+        run, report, _, _ = collect_with(routes, config_for_network(page_caps={"commits": 1}))
+        r90 = [r for r in run["repositories"] if r["repository_id"] == 90][0]
+        self.assertEqual((r90["commits"], r90["commits_complete"]), ([], False))
+        self.assertIs(repo_100(run)["commits_complete"], False)
+        self.assertEqual(len(repo_100(run)["commits"]), 1)
+        self.assertEqual(run["collection_report"]["commits_unavailable"], 1)
+        self.assertIs(report["complete"], False)
+        self.assertIs(run["collection_report"]["complete"], False)
+
+    def test_commits_unavailable_is_optional_and_never_negative(self):
+        from collector import schema
+
+        run, _, _, _ = collect_with(self.routes_with_409())
+        older = copy.deepcopy(run)
+        del older["collection_report"]["commits_unavailable"]
+        self.assertNotIn("commits_unavailable", schema.validate_run(older)["collection_report"])
+        state, _ = run_runs([older])
+        self.assertIs(state["collection"]["last_run"]["complete"], True)
+        for bad in (-1, "1", None, 1.5):
+            hostile = copy.deepcopy(run)
+            hostile["collection_report"]["commits_unavailable"] = bad
+            with self.assertRaises(schema.SchemaError, msg=repr(bad)):
+                schema.validate_run(hostile)
+
+    def test_409_on_commits_leaves_the_30_day_count_marked_incomplete(self):
+        from collector import catalog
+
+        run, _, _, _ = collect_with(self.routes_with_409())
+        state, _ = run_runs([run])
+        entry = [c for c in catalog.build_catalog(state) if c["id"] == 100][0]
+        self.assertIs(entry["commits_complete"], False)
+        self.assertIs(entry["commits_30d_complete"], False)
+
+    def test_409_after_known_commits_is_not_a_history_rewrite(self):
+        # A complete empty listing would lose the previous head and flag a rewrite; a 409 must not.
+        first, _, _, _ = collect_with(routes_for_network())
+        later, _, _, _ = collect_with(self.routes_with_409())
+        later = copy.deepcopy(later)
+        later["run_at"] = "2026-11-06T00:00:00Z"
+        state, events = run_runs([first, later])
+        obs = state["repositories"]["100"]
+        self.assertIsNotNone(obs["tip_sha"])
+        self.assertIs(obs["history_rewrite_suspected"], False)
+        self.assertEqual([e for e in events[1] if e["repository_id"] == 100 and e["type"] == "commits_observed"], [])
 
     def test_409_elsewhere_stays_a_failure(self):
         routes = routes_for_network()

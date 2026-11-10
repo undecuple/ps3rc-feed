@@ -44,8 +44,14 @@ Order of work in `collect`:
    in fetch order (see fetch_order), bounded by max_repositories. For each: GET /repositories/{id} (by id,
    so renames are followed), then GET .../commits?sha=<default branch>&
    since=<run_at minus the window>&per_page=100 (page cap; a cap sets
-   commits_complete false; a 409, GitHub's answer for an empty
-   repository, is an empty complete listing), GET .../releases?per_page=30
+   commits_complete false; a 409 is GitHub's answer for an empty
+   repository but can also mean the repository is temporarily
+   unavailable, so it is recorded as commits [] with commits_complete
+   false and no error: zero commits is never taken as certain from it.
+   Such repositories are counted in collection_report.commits_unavailable
+   and, unlike every other incomplete listing, do not make the run
+   incomplete, so a truly empty repository cannot keep every run
+   incomplete), GET .../releases?per_page=30
    (drafts, unpublished and id-less entries skipped), GET .../readme with
    the raw media type (cut to readme_bytes). Statuses: 404/410 ->
    not_found, 451 and plain 403 -> blocked, other non-200 -> failed; a
@@ -96,6 +102,8 @@ MAX_REPORT_ERRORS = 100
 # Items kept per listing: the run format's own caps, so validate_run cannot be exceeded by a listing.
 LIST_CAPS = {"search": schema.MAX_IDS, "forks": schema.MAX_IDS, "commits": schema.MAX_COMMITS, "releases": schema.MAX_RELEASES}
 METADATA_EXPECTED = ("fork", "archived", "stargazers_count", "default_branch")
+# A commits listing answered with this status is recorded as [] with commits_complete false and counted in
+# collection_report.commits_unavailable; it does not make the run incomplete (see step 3).
 EMPTY_REPOSITORY_STATUS = 409
 
 _SPACE_RE = re.compile(r"\s+")
@@ -658,6 +666,8 @@ def collect(client, config, run_at, last_attempted=None):
         "filtered_out": 0,
         "denied": 0,
     }
+    # Repositories whose commits listing answered 409: their commits_complete false does not make the run incomplete.
+    commits_unavailable = set()
     names = {}
     candidates = set()
     # Code search ids whose item gave no usable full_name: fetched only when another listing names them.
@@ -902,9 +912,11 @@ def collect(client, config, run_at, last_attempted=None):
                     repo["commits_complete"] = bool(pages.complete and dropped == 0 and not overflow)
                     after_pages(cpath, pages)
                 elif not failed and pages.status == EMPTY_REPOSITORY_STATUS:
-                    # GitHub answers 409 for a repository without commits: an empty, complete listing.
+                    # GitHub answers 409 for a repository without commits, but a 409 can also mean the
+                    # repository is temporarily unavailable: an empty listing that is not known to be complete.
                     repo["commits"] = []
-                    repo["commits_complete"] = True
+                    repo["commits_complete"] = False
+                    commits_unavailable.add(rid)
                 elif not failed:
                     after_pages(cpath, pages)
                     if pages.stopped is None:
@@ -950,7 +962,10 @@ def collect(client, config, run_at, last_attempted=None):
         and not report["not_fetched_repository_ids"]
         and all(s["complete"] for s in run["searches"])
         and all(r["forks_scan_complete"] for r in run["roots"])
-        and all(r["fetch_state"] == "ok" and r["commits_complete"] is not False for r in run["repositories"])
+        and all(
+            r["fetch_state"] == "ok" and (r["commits_complete"] is not False or r["repository_id"] in commits_unavailable)
+            for r in run["repositories"]
+        )
     )
     run["collection_report"] = {
         "complete": complete,
@@ -961,6 +976,7 @@ def collect(client, config, run_at, last_attempted=None):
         "requests_made": client.requests_made,
         "filtered_out": min(report["filtered_out"], schema.MAX_SAFE_INT),
         "denied": report["denied"],
+        "commits_unavailable": len(commits_unavailable),
     }
     if report["skipped_searches"]:
         run["collection_report"]["skipped_searches"] = report["skipped_searches"]

@@ -132,6 +132,11 @@ A repository left out is simply absent from the run: the run is partial (`comple
 it), the export keeps its previous values, and it is listed as not refreshed, not as failing. When more new
 repositories turn up every run than there are free places, the lowest new ids wait until fewer new ones arrive.
 
+GitHub answers 409 on the commits listing of an empty repository, but a 409 can also mean the repository is
+temporarily unavailable. Such a repository is recorded with no commits and `commits_complete` false (zero is not
+taken as certain), counted in `collection_report.commits_unavailable`, and does not make the run partial; any other
+incomplete commits listing (a page cap, dropped items) still does.
+
 ### Reviewing a change to `config/sources.json`
 
 1. Run `python3 -B -m collector collect --config config/sources.json` (no network): the config must load, and the
