@@ -188,6 +188,8 @@ test('order, scroll, group, view, pause and resume', () => {
   assert.equal(run('forks').state.view, 'forks');
   assert.equal(run('feed').state.view, 'feed');
   assert.equal(run('view forks').state.view, 'forks');
+  assert.equal(run('recent').state.view, 'recent');
+  assert.equal(run('view recent').state.view, 'recent');
   assert.equal(run('about').state.view, 'about');
   // the phosphor theme and CRT effects were removed with the terminal look
   for (const gone of ['theme green', 'crt off']) assert.equal(run(gone).state.search, gone, gone);
@@ -530,6 +532,9 @@ test('empty view message: feed with repositories but no events says so; other ca
     ['forks', 0, 0, none],
     ['forks', 0, 165, none],
     ['forks', 12, 165, filtered],
+    ['recent', 0, 0, none],
+    ['recent', 0, 165, none],
+    ['recent', 165, 165, filtered],
     ['about', 0, 0, null],
     ['about', 0, 165, null],
     ['about', 3, 165, null],
@@ -541,4 +546,75 @@ test('empty view message: feed with repositories but no events says so; other ca
   const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
   assert.ok(/el\('p', 'empty', T\.emptyMessage\(state\.view, all\.length, recs\.repos\.length\)\)/.test(app));
   assert.ok(!app.includes('Nothing here yet.') && !app.includes(noEvents));
+});
+
+test('views and commands include recent, with help and completion', () => {
+  assert.deepEqual(T.VIEWS, ['feed', 'table', 'forks', 'recent', 'about']);
+  for (const c of ['feed', 'table', 'forks', 'recent', 'about']) assert.ok(T.COMMAND_NAMES.includes(c), c);
+  assert.match(run('help view').out[0].text, /^view feed\|table\|forks\|recent\|about /);
+  assert.match(run('help view').out[0].text, /also: feed, table, forks, recent, about as commands/);
+  assert.equal(run('view nope').out[0].text, 'usage: view feed|table|forks|recent|about');
+  assert.deepEqual(T.complete('view re', ctx), { line: 'view recent ', options: [] });
+  assert.deepEqual(T.complete('rece', ctx), { line: 'recent ', options: [] });
+  // typing the shorthand at the prompt waits for Enter instead of searching
+  assert.equal(T.liveSearchText('recent'), null);
+});
+
+test('entering the recent view with the default sort sorts by first seen, newest first', () => {
+  const r = run('recent');
+  assert.equal(r.state.view, 'recent');
+  assert.deepEqual(r.state.sort, { key: 'first-seen', dir: 'desc' });
+  assert.equal(r.out[0].text, 'view: recent  sort: -first-seen');
+  assert.deepEqual(run('view recent').state.sort, { key: 'first-seen', dir: 'desc' });
+  // a sort the user picked is kept
+  const stars = run('sort stars').state;
+  assert.deepEqual(run('recent', stars).state.sort, { key: 'stars', dir: 'asc' });
+  const oldest = run('order oldest').state;
+  assert.deepEqual(run('recent', oldest).state.sort, { key: 'time', dir: 'asc' });
+  // inside the view a later sort is the user's, also time desc
+  const inRecent = run('sort -time', run('recent').state).state;
+  assert.deepEqual(run('view recent', inRecent).state.sort, { key: 'time', dir: 'desc' });
+  // other views never change the sort
+  for (const v of ['feed', 'table', 'forks', 'about']) assert.deepEqual(run('view ' + v).state.sort, { key: 'time', dir: 'desc' }, v);
+  // reset goes back to the feed and the default sort
+  assert.deepEqual(run('reset', run('recent').state).state.sort, { key: 'time', dir: 'desc' });
+});
+
+test('recent order: first seen, then stars descending, then repository name; unknown last', () => {
+  const t = (iso) => Date.parse(iso);
+  const mkr = (id, firstSeen, stars, repo) => ({ id, firstSeen, stars, repo });
+  const list = [
+    mkr('a', t('2026-11-01T00:00:00Z'), 5, 'zeta/z'),
+    mkr('b', t('2026-11-03T00:00:00Z'), 1, 'alpha/a'),
+    mkr('c', t('2026-11-01T00:00:00Z'), 5, 'Alpha/b'),
+    mkr('d', t('2026-11-01T00:00:00Z'), 40, 'mid/m'),
+    mkr('e', null, 99, 'none/n'),
+    mkr('f', t('2026-11-01T00:00:00Z'), null, 'beta/b'),
+  ];
+  const desc = T.sortRecent(list, { key: 'first-seen', dir: 'desc' });
+  assert.deepEqual(desc.map((r) => r.id), ['b', 'd', 'c', 'a', 'f', 'e']);
+  const asc = T.sortRecent(list, { key: 'first-seen', dir: 'asc' });
+  assert.deepEqual(asc.map((r) => r.id), ['d', 'c', 'a', 'f', 'b', 'e']);
+  // the input is not changed
+  assert.deepEqual(list.map((r) => r.id), ['a', 'b', 'c', 'd', 'e', 'f']);
+  // the sample feed: every repository, newest first seen first
+  const got = T.sortRecent(repos, { key: 'first-seen', dir: 'desc' }).map((r) => r.firstSeen);
+  assert.equal(got.length, feed.repos.length);
+  assert.ok(got.every((v, i) => i === 0 || got[i - 1] >= v));
+});
+
+test('repository records carry the description as plain text, not searched', () => {
+  const [r] = T.joinData({ repos: [{ id: 'r9', repo: 'x/y', description: 'A lifted racer' }, { id: 'r8', description: 3 }], events: [] }, NOW).repos;
+  assert.equal(r.description, 'A lifted racer');
+  assert.equal(T.joinData({ repos: [{ id: 'r8', description: 3 }], events: [] }, NOW).repos[0].description, null);
+  assert.equal(T.matches(r, [], 'racer', NOW), false);
+});
+
+test('recent view note is plain text and the page builds the view from it', () => {
+  assert.equal(T.RECENT_NOTE, 'First seen by this collector. Repositories first listed in a baseline collection all share one time, and the date is not when the repository was created.');
+  const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
+  assert.ok(app.includes("el('p', 'tablenote', T.RECENT_NOTE)"));
+  assert.ok(app.includes("'First seen': 'first-seen'"));
+  assert.ok(/state\.view === 'recent' \? T\.sortRecent : T\.sortRecords/.test(app));
+  assert.ok(!/innerHTML/.test(app));
 });
