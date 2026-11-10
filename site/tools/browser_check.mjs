@@ -190,6 +190,32 @@ for (const [kind, page, search] of runs) {
     await shot('-table');
     r.horizontalScrollAfter = (await evalJs('document.documentElement.scrollWidth')) > r.innerWidth;
     check(!r.horizontalScrollAfter, name + ': horizontal scroll after table');
+    if (kind === 'real') {
+      // the column headings stay at the top of the scrolling view
+      await typeLine('reset');
+      r.sticky = {};
+      for (const v of ['feed', 'table', 'forks']) {
+        await typeLine('view ' + v);
+        r.sticky[v] = await evalJs(`(() => {
+          const box = document.getElementById('view');
+          const head = box.querySelector('${v === 'feed' ? '.colhead' : 'thead th'}');
+          if (!head) return { error: 'no heading' };
+          box.scrollTop = 600;
+          const scrolled = box.scrollTop;
+          const top = head.getBoundingClientRect().top - box.getBoundingClientRect().top;
+          return { scrolled, offsetFromTop: Math.round(top), visible: top >= -1 && top <= 6 };
+        })()`);
+        if (mobile && v === 'feed') {
+          // phone rows are stacked, so the feed has no column headings there
+          r.sticky[v].hiddenOnPhone = await evalJs("getComputedStyle(document.querySelector('#view .colhead')).display === 'none'");
+          check(r.sticky[v].hiddenOnPhone, name + ': feed column heading is hidden on a phone');
+          continue;
+        }
+        check(r.sticky[v].scrolled > 0 && r.sticky[v].visible, name + ': ' + v + ' heading sticks (' + JSON.stringify(r.sticky[v]) + ')');
+        if (v === 'forks' || v === 'table') await shot('-sticky-' + v);
+      }
+      await typeLine('view feed');
+    }
     if (kind === 'real' && !mobile) {
       await typeLine('reset');
       await typeLine('demo 2');

@@ -307,6 +307,10 @@
       box.append(el('p', 'empty', all.length ? 'No rows match the current filters.' : 'Nothing here yet.'));
     } else if (state.view === 'feed') {
       const ul = el('ul', 'feed');
+      const head = el('li', 'colhead');
+      head.setAttribute('aria-hidden', 'true');
+      ['Time', 'Type', 'Game', 'Repository', 'Summary'].forEach((h) => head.append(el('span', null, h)));
+      ul.append(head);
       for (const g of T.groupRecords(shown, state.group)) {
         if (g.label !== null) ul.append(el('li', 'head', '== ' + state.group + ': ' + g.label + ' (' + g.items.length + ') =='));
         g.items.forEach((r) => ul.append(feedRow(r)));
