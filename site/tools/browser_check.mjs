@@ -108,6 +108,18 @@ for (const [name, w, h, mobile] of [['desktop-1280x800', 1280, 800, false], ['ph
   r.filterChangedRows = afterFilter.length !== r.rowsAtStart;
   r.sortFlipsOrder = ascending.join() !== afterSort.join() && ascending.slice().reverse().join() === afterSort.join();
   await typeLine('sort -stars');
+  r.gutter = await evalJs(`(() => {
+    const d = [...document.querySelectorAll('#out div')];
+    const first = d[0];
+    return {
+      lines: d.length,
+      numbered: d.every((x, i) => x.dataset.n === String(i + 1)),
+      before: first ? getComputedStyle(first, '::before').content : null,
+      selectable: first ? getComputedStyle(first, '::before').userSelect : null,
+      textHasNoNumber: first ? !/^\d/.test(first.textContent) : false,
+      header: document.getElementById('outcount').textContent,
+    };
+  })()`);
   await shot('-after-commands');
   await typeLine('table');
   await shot('-table');
