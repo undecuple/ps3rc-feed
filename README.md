@@ -166,7 +166,7 @@ incomplete commits listing (a page cap, dropped items) still does.
 2. Check the budget: `max_requests` stays under the token's hourly limit with margin (the job's built-in token
    allows 1000 requests an hour, search 30 a minute, code search 10 a minute), and repository searches x
    `page_caps.search` + code searches x `page_caps.code` + roots x `page_caps.forks` + 4 x `max_repositories` fits in
-   `max_requests`. For the committed config: 7 x 3 + 1 x 1 + 1 x 10 = 32, plus 4 x 190 = 760, is 792 of 800.
+   `max_requests`. For the committed config: 7 x 3 + 1 x 10 = 31, plus 4 x 190 = 760, is 791 of 800. The committed config has no code query: code search answered 429 on every run with the built-in token, so it stays an option for other configs, not a source here.
    The fetch order changes which candidates are fetched, not how many, and `--previous-state` costs no request.
    With 190 places, two runs reach every candidate while there are at most 380 (fewer by the roots and `include`
    entries, which take a place in every run).
