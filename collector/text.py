@@ -207,12 +207,65 @@ def readme_title(readme_excerpt):
     return None
 
 
+# Headings that name a README section, never a game. Compared as slugs, so
+# case and punctuation do not matter ("Table of Contents:" -> table-of-contents).
+GENERIC_HEADINGS = frozenset(
+    [
+        "table-of-contents", "contents", "toc", "docs", "documentation", "readme",
+        "introduction", "overview", "about", "features", "usage", "installation",
+        "getting-started", "quick-start", "quickstart", "license", "changelog",
+        "description", "build", "building", "requirements", "project-structure",
+        "notes", "links", "credits", "screenshots", "demo", "download", "status",
+    ]
+)
+# Trailing words that only say what was done to a game, not which game.
+RESTATED_SUFFIXES = frozenset(["recomp", "recompiled", "recompilation", "port", "pc", "native", "ps3"])
+
+
+def _core(key):
+    """Slug with trailing RESTATED_SUFFIXES words removed; may be empty."""
+    words = key.split("-")
+    while words and words[-1] in RESTATED_SUFFIXES:
+        words.pop()
+    return "-".join(words)
+
+
+def game_title(repo_name, title):
+    """title when it can name a game in repository repo_name, else None.
+
+    A title is rejected when any of these hold (all on text.slug forms):
+    - it is a GENERIC_HEADINGS entry (a README section name);
+    - it or the repository name starts with "awesome" (a curated list);
+    - it equals the repository-name slug (the name restated, no evidence);
+    - after dropping trailing RESTATED_SUFFIXES words from the title only,
+      what is left is non-empty and equals the repository-name slug
+      ("Haze PC Port" in haze). A title made only of those words is not
+      rejected by this rule.
+    Only the title is trimmed, so a shorter title stays: "Skyfall" in
+    skyfall-recomp is kept. Slugs keep word breaks, so "Drakengard 3
+    Recompiled" (core drakengard-3) in drakengard3-port stays a game.
+    """
+    key = slug(title)
+    name_key = slug(repo_name) or ""
+    if key is None or key in GENERIC_HEADINGS:
+        return None
+    if key.startswith("awesome") or name_key.startswith("awesome"):
+        return None
+    if key == name_key:
+        return None
+    core = _core(key)
+    if core and core == name_key:
+        return None
+    return title
+
+
 def classify(full_name, description, readme_excerpt):
     """Heuristic category, inferred game and toolkit for a repository.
 
     Returns (category, game, toolkit) where game and toolkit are the dicts
     stored in the observation. Everything here is an automated guess and is
-    always marked inferred and unverified.
+    always marked inferred and unverified. The game title is the first
+    README heading when game_title accepts it.
     """
     name = full_name.split("/", 1)[1].lower()
     haystack = " ".join(x for x in (name, description or "", readme_excerpt or "")).lower()
@@ -223,7 +276,7 @@ def classify(full_name, description, readme_excerpt):
     if "ps3recomp" in name:
         return "framework", unknown, toolkit
 
-    title = readme_title(readme_excerpt)
+    title = game_title(name, readme_title(readme_excerpt))
     key = slug(title)
     if key:
         game = {

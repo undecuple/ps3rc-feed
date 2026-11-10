@@ -193,6 +193,20 @@ class G3CopiedReadmeFingerprint(CollectorTestCase):
         state, _ = self.assertDeterministic([run(T(5), [frame(), skyfall(), other])])
         self.assertEqual(state["repositories"]["302"]["game"]["basis"], "readme_title")
 
+    def test_generic_root_heading_is_never_copied_as_a_game(self):
+        # The root's heading names no game, so neither the root nor a fork that copies it gets one.
+        root = skyfall(readme="# Table of Contents\n")
+        grandchild = fork(302, "fork-b/skyfall-recomp", 301, 100, readme="# Table of Contents\n")
+        state, _ = self.assertDeterministic([run(T(5), [frame(), root, grandchild])])
+        for rid in ("100", "302"):
+            self.assertIsNone(state["repositories"][rid]["game"]["key"], rid)
+            self.assertNotEqual(state["repositories"][rid]["category"], "game", rid)
+        # A tracked parent with a real title still passes it to a fork whose own heading is generic.
+        child = fork(400, "child-org/skyfall-recomp", 100, 90, readme="# Overview\n", commits=[(0xA, T(3))])
+        state, _ = self.assertDeterministic([run(T(5), [frame(), skyfall(), child])])
+        game = state["repositories"]["400"]["game"]
+        self.assertEqual((game["key"], game["basis"], game["inherited_from"]), ("skyfall", "inherited_from_parent", 100))
+
 
 class G4InheritedChangesAreAggregated(CollectorTestCase):
     def test_thousand_children_flipping_three_times_give_six_events(self):
