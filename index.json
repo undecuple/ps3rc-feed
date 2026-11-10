@@ -1,0 +1,23 @@
+{
+ "files": {
+  "events/2026-11.jsonl": {
+   "bytes": 55222,
+   "compressed": false,
+   "lines": 272,
+   "sha256": "c51f88c0d9f92d8360ab1f140e81d7a27328f0ec9de35d1e976b750992f9f22d"
+  },
+  "snapshots/2026-11.jsonl": {
+   "bytes": 58364,
+   "compressed": false,
+   "lines": 337,
+   "sha256": "ec98865be41b04b7679b43350dac118c83911a14f741c04f6d3ca09b27866e85"
+  }
+ },
+ "format_version": 1,
+ "last_run_at": "2026-11-10T19:44:30Z",
+ "months": [
+  "2026-11"
+ ],
+ "runs": 1,
+ "total_bytes": 113586
+}
