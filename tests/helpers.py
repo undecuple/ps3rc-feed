@@ -10,9 +10,29 @@ import copy
 import json
 import os
 import re
+import socket
 import unittest
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+class NetworkBlocked(Exception):
+    """A test tried to open a socket or resolve a name."""
+
+
+def _blocked(*args, **kwargs):
+    raise NetworkBlocked("network blocked by the test guard")
+
+
+def block_network():
+    """No test may reach the network: every socket connect and name lookup raises."""
+    socket.socket.connect = _blocked
+    socket.socket.connect_ex = _blocked
+    socket.create_connection = _blocked
+    socket.getaddrinfo = _blocked
+
+
+block_network()
 
 # Keys whose values are allowed to differ between an unchanged re-run and
 # the run before it (test T2: "byte-identical apart from last-run timestamps").

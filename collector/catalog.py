@@ -150,6 +150,7 @@ def build_entry(state, obs):
         "stale": obs["stale"],
         "partial": obs["partial"],
         "collection_failing": obs["consecutive_failures"] > 0,
+        "refreshed_in_last_run": obs["last_attempted_refresh_at"] == state["last_run_at"],
         "collection_state": obs["collection_state"],
         "last_successful_refresh_at": obs["last_successful_refresh_at"],
         "last_attempted_refresh_at": obs["last_attempted_refresh_at"],
@@ -175,12 +176,25 @@ def collection_status(state):
     col = state["collection"]
     repos = state["repositories"].values()
     searches, roots = incomplete_work(col)
+    last = col.get("last_run") or {"last_run_at": None, "complete": True, "stopped": None, "not_fetched": 0, "error_count": 0}
     return {
         "last_run_at": state["last_run_at"],
         "baseline_done": state["baseline_done"],
         "baseline_at": state["baseline_at"],
         "repositories": len(state["repositories"]),
-        "incomplete": bool(searches or roots),
+        # Incomplete when any stored scan is partial, or when the last run itself did not finish.
+        "incomplete": bool(searches or roots) or not last["complete"],
+        "last_run": {
+            "run_at": last["last_run_at"],
+            "complete": last["complete"],
+            "stopped": last["stopped"],
+            "not_fetched_count": last["not_fetched"],
+            "error_count": last["error_count"],
+        },
+        # Known repositories the last run did not touch: their values age, they are not failing.
+        "not_refreshed": sorted(
+            o["repository_id"] for o in repos if state["last_run_at"] is not None and o["last_attempted_refresh_at"] != state["last_run_at"]
+        ),
         "incomplete_searches": searches,
         "incomplete_roots": roots,
         "failing": sorted(o["repository_id"] for o in repos if o["consecutive_failures"] > 0),

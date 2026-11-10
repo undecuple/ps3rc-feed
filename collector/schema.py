@@ -48,7 +48,9 @@ DIGITS_RE = re.compile(r"[0-9]+\Z")
 _SCHEME_RE = re.compile(r"(javascript|data|vbscript|file|ftp|http):", re.IGNORECASE)
 _MENTION_RE = re.compile(r"@(everyone|here)", re.IGNORECASE)
 
-FETCH_STATES = ("ok", "rate_limited", "not_found")
+# blocked: the source answered 403 (not a rate limit) or 451; failed: any
+# other non-200 answer or an unusable body. Neither claims a reason.
+FETCH_STATES = ("ok", "rate_limited", "not_found", "blocked", "failed")
 COLLECTION_STATES = ("ok", "partial", "failing", "stale", "not_found")
 
 
@@ -495,8 +497,19 @@ RUN = Obj(
         "repositories": List(REPOSITORY, MAX_REPOSITORIES),
         # Written by validate_run: fields it downgraded instead of refusing the run.
         "rejected_fields": List(REJECTED, MAX_REJECTED),
+        # Written by the collector: whether the fetch finished, and why not.
+        "collection_report": Obj(
+            {
+                "complete": Bool(),
+                "stopped": Nullable(Enum(("rate_limited", "budget", "network"))),
+                "error_count": NonNegInt(),
+                "dropped_items": NonNegInt(),
+                "not_fetched": NonNegInt(),
+                "requests_made": NonNegInt(),
+            }
+        ),
     },
-    optional=("fictional", "rejected_fields"),
+    optional=("fictional", "rejected_fields", "collection_report"),
 )
 
 
@@ -738,6 +751,16 @@ COLLECTION = Obj(
         "pending_repository_ids": List(PositiveId(), MAX_IDS),
         # Fields the last run's loader downgraded instead of refusing the run.
         "rejected_fields": List(REJECTED, MAX_REJECTED),
+        # Whether the last applied run fetched everything it set out to fetch.
+        "last_run": Obj(
+            {
+                "last_run_at": Nullable(TIMESTAMP),
+                "complete": Bool(),
+                "stopped": Nullable(Enum(("rate_limited", "budget", "network"))),
+                "not_fetched": NonNegInt(),
+                "error_count": NonNegInt(),
+            }
+        ),
     }
 )
 

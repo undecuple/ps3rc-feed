@@ -1,0 +1,82 @@
+{
+  "fictional": true,
+  "responses": {
+    "GET /search/repositories?page=1&per_page=100&q=ps3recomp+in%3Aname": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "29", "x-ratelimit-reset": "1800000000"},
+      "body": {
+        "total_count": 2,
+        "incomplete_results": false,
+        "items": [
+          {"id": 90, "full_name": "frame-org/ps3recomp-example", "owner": {"login": "frame-org"}, "html_url": "javascript:alert(1)"},
+          {"id": 100, "full_name": "game-org/skyfall-recomp", "owner": {"login": "game-org"}, "html_url": "javascript:alert(1)"}
+        ]
+      }
+    },
+    "GET /repos/frame-org/ps3recomp-example/forks?page=1&per_page=100": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4999"},
+      "body": [
+        {"id": 100, "full_name": "game-org/skyfall-recomp", "owner": {"login": "game-org"}, "fork": true}
+      ]
+    },
+    "GET /repositories/90": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4998"},
+      "body": {
+        "id": 90, "full_name": "frame-org/ps3recomp-example", "owner": {"login": "frame-org", "id": 1},
+        "description": "Fictional framework", "fork": false, "archived": false, "stargazers_count": 5,
+        "default_branch": "main", "html_url": "javascript:alert(1)", "private": false
+      }
+    },
+    "GET /repositories/100": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4997"},
+      "body": {
+        "id": 100, "full_name": "game-org/skyfall-recomp", "owner": {"login": "game-org", "id": 2},
+        "description": "Recomp of Skyfall (fictional)", "fork": true, "archived": false, "stargazers_count": 5,
+        "default_branch": "main", "parent": {"id": 90, "full_name": "frame-org/ps3recomp-example"},
+        "source": {"id": 90, "full_name": "frame-org/ps3recomp-example"}, "html_url": "javascript:alert(1)"
+      }
+    },
+    "GET /repos/frame-org/ps3recomp-example/commits?page=1&per_page=100&sha=main&since=2026-10-06T00%3A00%3A00Z": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4996"},
+      "body": [
+        {"sha": "0000000000000000000000000000000000000002", "commit": {"message": "fictional change", "committer": {"date": "2026-11-02T12:00:00Z"}}},
+        {"sha": "0000000000000000000000000000000000000001", "commit": {"message": "fictional change", "committer": {"date": "2026-11-01T12:00:00Z"}}}
+      ]
+    },
+    "GET /repos/game-org/skyfall-recomp/commits?page=1&per_page=100&sha=main&since=2026-10-06T00%3A00%3A00Z": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4995"},
+      "body": [
+        {"sha": "000000000000000000000000000000000000000b", "commit": {"message": "fictional change", "committer": {"date": "2026-11-04T12:00:00Z"}}},
+        {"sha": "000000000000000000000000000000000000000a", "commit": {"message": "fictional change", "committer": {"date": "2026-11-03T12:00:00Z"}}}
+      ]
+    },
+    "GET /repos/frame-org/ps3recomp-example/releases?per_page=30": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4994"},
+      "body": []
+    },
+    "GET /repos/game-org/skyfall-recomp/releases?per_page=30": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4993"},
+      "body": [
+        {"id": 7001, "tag_name": "v0.1.0", "published_at": "2026-11-04T10:00:00Z", "draft": false},
+        {"id": 7002, "tag_name": "draft", "published_at": null, "draft": true}
+      ]
+    },
+    "GET /repos/frame-org/ps3recomp-example/readme": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4992"},
+      "body": "# Fictional\n"
+    },
+    "GET /repos/game-org/skyfall-recomp/readme": {
+      "status": 200,
+      "headers": {"x-ratelimit-remaining": "4991"},
+      "body": "# Skyfall\n"
+    }
+  }
+}

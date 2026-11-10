@@ -84,7 +84,8 @@ class EventSchemaTests(CollectorTestCase):
 
         for name in os.listdir(FIXTURES):
             folder = os.path.join(FIXTURES, name)
-            if not os.path.isdir(folder):
+            # github_recorded holds canned API answers, not run files.
+            if not os.path.isdir(folder) or name == "github_recorded":
                 continue
             for f in sorted(os.listdir(folder)):
                 run = schema.load_run_file(os.path.join(folder, f))
