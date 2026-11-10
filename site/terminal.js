@@ -430,6 +430,67 @@
   }
   const sortLabel = (s) => (s.dir === 'desc' ? '-' : '') + s.key;
 
+  // ---------- notice ----------
+
+  const DEFAULT_STALE_MINUTES = 45;
+  const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+  function feedTime(feed) {
+    return isObj(feed) ? ms(feed.generated_at) : null;
+  }
+
+  function staleMinutes(feed) {
+    const m = isObj(feed) ? feed.stale_after_minutes : undefined;
+    return Number.isSafeInteger(m) && m > 0 ? m : DEFAULT_STALE_MINUTES;
+  }
+
+  // True when the feed is older than its stale_after_minutes (or the default).
+  function feedStale(feed, now) {
+    const t = feedTime(feed);
+    return t !== null && Number.isFinite(now) && now - t > staleMinutes(feed) * 60000;
+  }
+
+  // The feed's collection object, checked: { complete, notFetched, errors } or null when missing,
+  // malformed, contradictory or not about the run that made this feed.
+  function collectionState(feed) {
+    const c = isObj(feed) ? feed.collection : null;
+    if (!isObj(c) || typeof c.complete !== 'boolean') return null;
+    if (c.stopped !== undefined && c.stopped !== null && typeof c.stopped !== 'string') return null;
+    const optCount = (v) => (v === undefined || v === null ? undefined : count(v));
+    const notFetched = optCount(c.not_fetched);
+    const errors = optCount(c.error_count);
+    if (notFetched === null || errors === null) return null;
+    const runAt = ms(c.last_run_at);
+    if (runAt === null || runAt !== feedTime(feed)) return null;
+    if (c.complete && (typeof c.stopped === 'string' || notFetched > 0 || errors > 0)) return null;
+    return { complete: c.complete, notFetched: notFetched === undefined ? null : notFetched, errors: errors === undefined ? null : errors };
+  }
+
+  // Plain sentences for the notice and the About view, built only from the feed. Never claims
+  // completeness unless the feed's collection object says so and is consistent.
+  function noticeText(feed, now) {
+    const parts = [];
+    const sample = isObj(feed) && feed.sample === true;
+    if (sample) parts.push('SAMPLE (fictional): every name, number and date here is made up, and none of it comes from GitHub.');
+    const t = feedTime(feed);
+    parts.push(t === null ? 'The collection time is unknown.' : 'Last collected: ' + fmtTime(t) + '.');
+    const c = collectionState(feed);
+    if (!c) parts.push('The collection state is unknown.');
+    else if (c.complete) parts.push('The last collection was complete.');
+    else {
+      parts.push('The last collection was incomplete, so some entries and numbers may be missing.');
+      if (c.notFetched !== null) parts.push('Repositories not fetched: ' + c.notFetched + '.');
+      if (c.errors !== null) parts.push('Errors: ' + c.errors + '.');
+    }
+    if (feedStale(feed, now)) parts.push('This data is older than ' + staleMinutes(feed) + ' minutes and may be out of date.');
+    if (!sample) parts.push('Repository metadata comes from GitHub.');
+    parts.push('Game, category and toolkit labels are inferred and may be wrong.');
+    parts.push('This page is not real time.');
+    parts.push('No game files are hosted here.');
+    return parts.join(' ');
+  }
+
   // ---------- commands ----------
 
   const err = (text) => ({ text, kind: 'error' });
@@ -713,6 +774,6 @@
     initialState, tokenize, parseTerm, parseTime, parseSort, safeGithubUrl, typeLabel,
     deriveStatus, joinData, matches, dropUntouched, sortRecords, groupRecords, execute, complete,
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
-    orUnknown, gameLabel, eventTime, compareLabel,
+    orUnknown, gameLabel, eventTime, compareLabel, noticeText, collectionState, feedStale,
   };
 });

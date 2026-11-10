@@ -424,3 +424,92 @@ test('untouched forks are hidden by default and a search or the toggle shows the
   assert.equal(run('untouched maybe', s).out[0].kind, 'error');
   assert.equal(run('reset', r.state).state.hideUntouched, true);
 });
+
+test('notice text is built from the feed collection object', () => {
+  const at = '2026-12-01T06:00:00Z';
+  const t = Date.parse(at);
+  const mk = (collection, extra) => Object.assign({ generated_at: at, repos: [], events: [], collection }, extra);
+  const base = { complete: true, stopped: null, not_fetched: 0, error_count: 0, last_run_at: at };
+  const tail = ' Repository metadata comes from GitHub. Game, category and toolkit labels are inferred and may be wrong. This page is not real time. No game files are hosted here.';
+  const common = (s) => {
+    assert.ok(!/by hand|three|runs?\b/i.test(s), s);
+    assert.ok(s.endsWith(tail), s);
+  };
+
+  // complete
+  const complete = T.noticeText(mk(base), t);
+  assert.equal(complete, 'Last collected: 2026-12-01 06:00 UTC. The last collection was complete.' + tail);
+  common(complete);
+
+  // incomplete, with counts
+  const inc = T.noticeText(mk(Object.assign({}, base, { complete: false, stopped: 'rate_limited', not_fetched: 12, error_count: 3 })), t);
+  assert.equal(inc, 'Last collected: 2026-12-01 06:00 UTC. The last collection was incomplete, so some entries and numbers may be missing. Repositories not fetched: 12. Errors: 3.' + tail);
+  common(inc);
+  // incomplete, counts unknown
+  const incNull = T.noticeText(mk(Object.assign({}, base, { complete: false, not_fetched: null, error_count: undefined })), t);
+  assert.ok(incNull.includes('was incomplete') && !/not fetched|Errors/.test(incNull), incNull);
+
+  // missing and malformed: neutral, never complete
+  const unknown = 'Last collected: 2026-12-01 06:00 UTC. The collection state is unknown.' + tail;
+  const bad = [
+    undefined, null, 'complete', [], [base], {},
+    Object.assign({}, base, { complete: 'true' }),
+    Object.assign({}, base, { complete: 1 }),
+    Object.assign({}, base, { not_fetched: -1 }),
+    Object.assign({}, base, { not_fetched: 1.5 }),
+    Object.assign({}, base, { error_count: '0' }),
+    Object.assign({}, base, { complete: false, error_count: NaN }),
+    Object.assign({}, base, { complete: false, not_fetched: Infinity }),
+    Object.assign({}, base, { stopped: 5 }),
+    Object.assign({}, base, { last_run_at: 'yesterday' }),
+    Object.assign({}, base, { last_run_at: undefined }),
+    Object.assign({}, base, { last_run_at: '2026-11-30T06:00:00Z' }),
+    // contradictions: "complete" with a stop reason, missing repositories or errors
+    Object.assign({}, base, { stopped: 'budget' }),
+    Object.assign({}, base, { not_fetched: 2 }),
+    Object.assign({}, base, { error_count: 1 }),
+  ];
+  for (const c of bad) {
+    const s = T.noticeText(mk(c), t);
+    assert.equal(s, unknown, JSON.stringify(c));
+    assert.ok(!/was complete|was incomplete/.test(s));
+  }
+  const noKey = mk(base);
+  delete noKey.collection;
+  assert.equal(T.noticeText(noKey, t), unknown);
+  assert.equal(T.collectionState(noKey), null);
+  // no feed at all, or no usable time
+  const none = 'The collection time is unknown. The collection state is unknown.' + tail;
+  assert.equal(T.noticeText(null, t), none);
+  assert.equal(T.noticeText(undefined, NaN), none);
+  assert.equal(T.noticeText(mk(base, { generated_at: 'nope' }), t), none);
+
+  // stale: older than stale_after_minutes, or the 45 minute default when it is absent or invalid
+  const staleLine = (m) => ' This data is older than ' + m + ' minutes and may be out of date.';
+  assert.ok(!T.noticeText(mk(base, { stale_after_minutes: 90 }), t + 90 * 60000).includes('older than'));
+  assert.ok(T.noticeText(mk(base, { stale_after_minutes: 90 }), t + 90 * 60000 + 1).includes(staleLine(90)));
+  assert.ok(!T.noticeText(mk(base), t + 45 * 60000).includes('older than'));
+  assert.ok(T.noticeText(mk(base), t + 45 * 60000 + 1).includes(staleLine(45)));
+  for (const m of [0, -5, 1.5, '90', NaN, Infinity, null]) {
+    assert.ok(T.noticeText(mk(base, { stale_after_minutes: m }), t + 46 * 60000).includes(staleLine(45)), String(m));
+  }
+  assert.equal(T.feedStale(mk(base), t + 46 * 60000), true);
+  assert.equal(T.feedStale(mk(base), NaN), false);
+  assert.equal(T.noticeText(mk(base), t + 46 * 60000), 'Last collected: 2026-12-01 06:00 UTC. The last collection was complete.' + staleLine(45) + tail);
+
+  // sample: labelled, and never says the data comes from GitHub
+  const sample = T.noticeText(feed, NOW);
+  assert.ok(sample.startsWith('SAMPLE (fictional): '), sample);
+  assert.ok(!sample.includes('Repository metadata comes from GitHub.'), sample);
+  assert.ok(sample.includes('The collection state is unknown.') && sample.includes('Last collected: 2026-11-09 14:32 UTC.'), sample);
+  assert.ok(!T.noticeText(mk(base, { sample: 'true' }), t).startsWith('SAMPLE'));
+});
+
+test('page text before the script runs is the neutral notice, with no fixed dates or run counts', () => {
+  const html = fs.readFileSync(__dirname + '/index.html', 'utf8');
+  const m = /<span id="notice">([^<]*)<\/span>/.exec(html);
+  assert.ok(m, 'notice span');
+  assert.equal(m[1], T.noticeText(null, NOW));
+  const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
+  for (const src of [html, app]) assert.ok(!/by hand|three read-only|2026-11-10|last run was incomplete/i.test(src));
+});

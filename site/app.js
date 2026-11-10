@@ -177,7 +177,7 @@
   function ctx() {
     const t = now();
     const g = (k) => [...new Set(recs.repos.map((r) => r[k]).filter(Boolean))].sort();
-    const stale = data ? t - Date.parse(data.generated_at) > (data.stale_after_minutes || 45) * 60000 : false;
+    const stale = data ? T.feedStale(data, t) : false;
     return {
       now: t,
       stale,
@@ -301,9 +301,12 @@
     add('h2', 'Disclaimer');
     add('p', 'ps3rc-feed is an automated, unofficial index. Project discovery, game associations, toolkit detection and repository descriptions may be incorrect or outdated. Entries do not verify authorship, endorsement, safety, playability or completion. Activity and timestamps reflect collected GitHub data. Follow source links to evaluate each project.');
     add('h2', 'This build');
-    add('p', 'Public GitHub repositories that match PS3 recompilation searches, plus the forks of one root repository. The data comes from three read-only collection runs on 2026-11-10 (UTC) and was published by hand. The last run was incomplete: some repositories could not be fully collected, so entries and numbers may be missing. Game, category and toolkit labels are inferred from names and descriptions and may be wrong. This site hosts no game files.');
+    add('p', 'Public GitHub repositories that match PS3 recompilation searches, plus forks of selected root repositories.');
+    const n = el('p', null, T.noticeText(data, now()));
+    n.id = 'about-notice';
+    d.append(n);
     add('h2', 'What "live" means');
-    add('p', 'Nothing here is real time. The feed changes only when a new export is published by hand. The page checks a small manifest every 60 seconds (paused in hidden tabs, with backoff on failure) and reloads the feed only when its version changes. Event times are GitHub source times, or collection times when GitHub gives none.');
+    add('p', 'Nothing here is real time. The feed changes only when a new export is published. The page checks a small manifest every 60 seconds (paused in hidden tabs, with backoff on failure) and reloads the feed only when its version changes. Event times are GitHub source times, or collection times when GitHub gives none.');
     add('h2', 'Status values');
     add('p', 'Statuses describe observed activity only: active (activity in the last 30 days), quiet (older), stale (collection is failing), archived. They say nothing about whether a project works. unknown means missing, never zero.');
     add('h2', 'Fork and game labels');
@@ -376,6 +379,8 @@
 
   function renderChrome(total, count, hidden) {
     const c = ctx();
+    const notice = T.noticeText(data, c.now);
+    if ($('notice').textContent !== notice) $('notice').textContent = notice;
     $('statusline').textContent = data
       ? 'collected ' + T.hhmm(Date.parse(data.generated_at)) + ' UTC (' + T.ago(Date.parse(data.generated_at), c.now) + ') | feed stale: ' + (c.stale ? 'yes' : 'no') + ' | connection: ' + conn + ' | times shown are source times, or collection times when the source gives none, UTC'
       : 'connection: ' + conn;
@@ -557,7 +562,7 @@
       if (document.hidden) clearTimeout(timer);
       else poll();
     });
-    print({ text: 'ps3rc-feed: unofficial index of public GitHub repositories, collected 2026-11-10 UTC, published by hand. Type help or about. Press / to focus the prompt.' }, 'dim');
+    print({ text: 'ps3rc-feed: unofficial index of public GitHub repositories, not real time. Type help or about. Press / to focus the prompt.' }, 'dim');
     poll();
   }
 
