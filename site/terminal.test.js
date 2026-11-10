@@ -513,3 +513,32 @@ test('page text before the script runs is the neutral notice, with no fixed date
   const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
   for (const src of [html, app]) assert.ok(!/by hand|three read-only|2026-11-10|last run was incomplete/i.test(src));
 });
+
+test('empty view message: feed with repositories but no events says so; other cases keep their message', () => {
+  const none = 'Nothing here yet.';
+  const filtered = 'No rows match the current filters.';
+  const noEvents = 'No events yet. The next collection compares against this baseline. The table and forks views list the repositories already found.';
+  // [view, rows before filters, repositories, expected]
+  const cases = [
+    ['feed', 0, 0, none],
+    ['feed', 0, 165, noEvents],
+    ['feed', 3, 0, filtered],
+    ['feed', 3, 165, filtered],
+    ['table', 0, 0, none],
+    ['table', 0, 165, none],
+    ['table', 165, 165, filtered],
+    ['forks', 0, 0, none],
+    ['forks', 0, 165, none],
+    ['forks', 12, 165, filtered],
+    ['about', 0, 0, null],
+    ['about', 0, 165, null],
+    ['about', 3, 165, null],
+  ];
+  for (const [view, total, repoCount, want] of cases) assert.equal(T.emptyMessage(view, total, repoCount), want, view + ' ' + total + ' ' + repoCount);
+  // the new sentence uses plain words only
+  assert.ok(!/export|collector|json|run_id/i.test(noEvents));
+  // the page takes its empty message from emptyMessage and sets it as text
+  const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
+  assert.ok(/el\('p', 'empty', T\.emptyMessage\(state\.view, all\.length, recs\.repos\.length\)\)/.test(app));
+  assert.ok(!app.includes('Nothing here yet.') && !app.includes(noEvents));
+});

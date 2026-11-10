@@ -493,6 +493,19 @@
 
   // ---------- commands ----------
 
+  // ---------- empty view ----------
+
+  const NO_EVENTS_YET = 'No events yet. The next collection compares against this baseline. The table and forks views list the repositories already found.';
+
+  // Message for a view with no rows to show. total: rows of this view before filters;
+  // repoCount: repositories in the feed. The About view always has content, so it gets null.
+  function emptyMessage(view, total, repoCount) {
+    if (view === 'about') return null;
+    if (total > 0) return 'No rows match the current filters.';
+    if (view === 'feed' && repoCount > 0) return NO_EVENTS_YET;
+    return 'Nothing here yet.';
+  }
+
   const err = (text) => ({ text, kind: 'error' });
   const ok = (text) => ({ text, kind: 'ok' });
 
@@ -775,5 +788,6 @@
     deriveStatus, joinData, matches, dropUntouched, sortRecords, groupRecords, execute, complete,
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
     orUnknown, gameLabel, eventTime, compareLabel, noticeText, collectionState, feedStale,
+    emptyMessage,
   };
 });
