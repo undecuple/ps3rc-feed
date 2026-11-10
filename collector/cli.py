@@ -161,7 +161,7 @@ def build_parser():
     col.add_argument("--recorded", help="canned-answer file under tests/fixtures/ to drive the collector without the network")
     col.add_argument("--run-at", help="run timestamp YYYY-MM-DDTHH:MM:SSZ (default: now, UTC)")
     col.add_argument("--live", action="store_true", help="use the live transport to api.github.com (read-only GET)")
-    col.add_argument("--anonymous", action="store_true", help="with --live: ignore GITHUB_TOKEN and send no Authorization header")
+    col.add_argument("--anonymous", action="store_true", help="ignore GITHUB_TOKEN and send no Authorization header; code queries are skipped (code search needs a token) and the run is incomplete")
     col.add_argument(
         "--max-requests",
         type=int,
@@ -528,7 +528,20 @@ def run_export(args):
     return EXIT_OK
 
 
+def _code_queries(config):
+    return sum(1 for q in config["queries"] if collect.query_kind(q) == "code")
+
+
 def run_collect(args):
+    """Plan, replay or run a collection.
+
+    Code search needs a token: with --anonymous the config's code queries are
+    left out of the plan (the payload says how many) and are not asked in a
+    live run, which is then incomplete; each such search is recorded with
+    skipped "no_token". Refusing instead would block every anonymous run of
+    the reviewed config, while skipping sends nothing GitHub would refuse and
+    keeps the gap visible in the run file.
+    """
     config = collect.load_config(args.config)
     run_at = args.run_at or _now_utc()
     schema.TIMESTAMP.check(run_at, "--run-at")
@@ -549,7 +562,11 @@ def run_collect(args):
             collect.collect(client, config, run_at)
             _print({"plan": client.log})
         else:
-            _print({"plan": collect.plan_requests(config)})
+            payload = {"plan": collect.plan_requests(config, authenticated=not args.anonymous)}
+            skipped = _code_queries(config) if args.anonymous else 0
+            if skipped:
+                payload["skipped_code_queries"] = skipped
+            _print(payload)
         return EXIT_OK
 
     sys.stderr.write("LIVE: read-only GET requests to https://api.github.com will be made.\n")
@@ -571,6 +588,8 @@ def run_collect(args):
     except ValueError as exc:
         raise RefusedInput("refused: GITHUB_TOKEN %s" % exc) from None
 
+    if token is None and _code_queries(config):
+        sys.stderr.write("note: %d code search queries are skipped without a token; the run will be incomplete.\n" % _code_queries(config))
     transport = github.LiveTransport()
     client = github.Client(transport, token=token, max_requests=max_requests, page_caps=config["page_caps"])
     run, report = collect.collect(client, config, run_at)
@@ -587,6 +606,7 @@ def run_collect(args):
             "error_count": report["error_count"],
             "errors": report["errors"],
             "dropped_items": report["dropped_items"],
+            "skipped_searches": report["skipped_searches"],
             "client": report["client"],
         }
     )

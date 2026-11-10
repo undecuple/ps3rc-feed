@@ -25,7 +25,8 @@ else.
 Budget: a hard cap on requests per client; page caps per listing; three
 consecutive transport failures stop the client (`NetworkFailed`). Rate
 limits are tracked per resource bucket (the x-ratelimit-resource header:
-core, search, ...; an answer without it counts as core): a parsed
+core, search, code_search, ...; an answer without it counts as core): a
+parsed
 remaining of 0 exhausts that bucket, and a request against an exhausted
 bucket raises RateLimited naming it before any transport call. A 403 or
 429 carrying retry-after, or a 429 while the bucket still has requests
@@ -66,11 +67,14 @@ USER_AGENT = "ps3rc-feed-collector (read-only; see repository README)"
 API_VERSION = "2022-11-28"
 ACCEPT_JSON = "application/vnd.github+json"
 ACCEPT_RAW = "application/vnd.github.raw"
-DEFAULT_PAGE_CAPS = {"search": 10, "forks": 10, "commits": 5}
+DEFAULT_PAGE_CAPS = {"search": 10, "code": 1, "forks": 10, "commits": 5}
 MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3
 MAX_HEADER_INT = 10**12
 CORE = "core"
 SEARCH = "search"
+# GET /search/code draws from its own bucket (about 10 requests a minute, token required).
+CODE_SEARCH = "code_search"
+CODE_SEARCH_PATH = "/search/code"
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{1,255}\Z")
 _PRINTABLE_RE = re.compile(r"[\x21-\x7e]{1,2048}\Z")
@@ -212,7 +216,8 @@ class Pages:
     """Items gathered over pages.
 
     complete is False when the cap or a stop ended the walk; `stopped` says
-    why ("rate_limited", "search_rate_limited", "budget", "network",
+    why ("rate_limited", "search_rate_limited", "code_search_rate_limited",
+    "budget", "network",
     "transport", "response", "status" or None); `status` is the first
     page's HTTP status (None when the first page produced no usable
     response).
@@ -255,7 +260,9 @@ def check_url(url):
 
 
 def resource_for_path(path):
-    """The rate-limit bucket a request path draws from."""
+    """The rate-limit bucket a request path draws from: code_search, search or core."""
+    if path == CODE_SEARCH_PATH:
+        return CODE_SEARCH
     return SEARCH if path.startswith("/search/") else CORE
 
 
@@ -751,7 +758,7 @@ class Client:
         if remaining == 0:
             self.exhausted.add(resource)
         if response.status in (403, 429) and remaining == 0:
-            label = resource if resource_for_path(path) == SEARCH else CORE
+            label = resource if resource_for_path(path) != CORE else CORE
             self.exhausted.add(label)
             raise RateLimited("%s rate limit reached at %s (status %d)" % (resource, path, response.status), label)
 
@@ -846,7 +853,11 @@ class Client:
 
 def _stop_reason(exc):
     if isinstance(exc, RateLimited):
-        return "search_rate_limited" if exc.resource == SEARCH else "rate_limited"
+        if exc.resource == SEARCH:
+            return "search_rate_limited"
+        if exc.resource == CODE_SEARCH:
+            return "code_search_rate_limited"
+        return "rate_limited"
     if isinstance(exc, BudgetExhausted):
         return "budget"
     return "network"
