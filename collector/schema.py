@@ -541,8 +541,12 @@ RUN = Obj(
                 "denied": NonNegInt(),
                 # Searches not asked at all (see a search's `skipped`). Makes the run incomplete.
                 "skipped_searches": NonNegInt(),
+                # Repositories whose commits listing answered 409 (empty, or temporarily
+                # unavailable): recorded with commits [] and commits_complete false, but
+                # they do not make the run incomplete. Absent in older runs.
+                "commits_unavailable": NonNegInt(),
             },
-            optional=("filtered_out", "denied", "skipped_searches"),
+            optional=("filtered_out", "denied", "skipped_searches", "commits_unavailable"),
         ),
     },
     optional=("fictional", "rejected_fields", "collection_report"),
