@@ -6,6 +6,7 @@ on:
     paths:
       - "site/**"
       - ".github/workflows/pages.yml"
+      - ".github/scripts/overlay_feed.py"
   workflow_dispatch:
 
 permissions:
@@ -45,13 +46,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Scheduled refreshes keep the newest feed on the feed-state branch. Use it when it is there and
+      # consistent, so a push to main does not put older committed data back.
+      - name: Look for the feed-state branch
+        id: state
+        run: |
+          if git ls-remote --exit-code --heads origin refs/heads/feed-state > /dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no feed-state branch; the committed data is served"
+          fi
+      - if: steps.state.outputs.exists == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feed-state
+          path: feed-state
+          persist-credentials: false
       - name: Collect served files
         run: |
           mkdir out
           cd site
           cp index.html style.css terminal.js app.js carpet.svg favicon.svg ../out/
           cp -r fonts data ../out/
-          cd ../out
+          cd ..
+          python3 -B .github/scripts/overlay_feed.py feed-state out/data
+          cd out
           find . -type f | sort
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

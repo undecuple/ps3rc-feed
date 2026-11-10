@@ -160,13 +160,27 @@ scripts, class projects and profile pages next to the few repositories about the
 `require_any` terms, and only results whose name or description contains one of them are kept. The rules are in
 "Sources config" above.
 
-## Planned automation
+## Scheduled refresh
 
-Planned, not running. Each step is its own reviewed change.
+`.github/workflows/refresh.yml` refreshes the feed on GitHub runners with the built-in token. It runs only when the
+repository variable `REFRESH_ENABLED` is `true`. Until the maintainer sets it, every job is skipped and the page keeps
+the data published by hand.
 
-1. Read the page's notice text from the feed.
-2. A scheduled workflow on GitHub runners that uses the built-in token.
-3. Switch it on only after the maintainer approves.
+When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand from the Actions tab. One run:
+
+1. Collects with `--max-requests 800`, plus one request that checks code search and prints only the status.
+2. Exports on top of the state saved by the previous run.
+3. Saves `state.json`, `feed.json` and `manifest.json` on the `feed-state` branch. Each run replaces the branch with
+   one commit. Run files are never committed.
+4. Runs the site tests and deploys the page with the new feed.
+
+A run makes at most 801 requests, and four runs a day make at most 3,204. Scheduled runs start 6 hours apart and
+never overlap, so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
+by hand adds up to 801 more, and the collector stops when it reaches a rate limit.
+
+The first run finds no `feed-state` branch. It then starts from an empty state, so its feed is a baseline with no
+events. A push to `main` deploys the page with the feed from `feed-state` when that feed matches its manifest, and
+with the committed `site/data/` otherwise.
 
 ## How AI was used
 
