@@ -6,7 +6,14 @@
 
 An automated, unofficial activity feed for PS3 recompilation projects on GitHub.
 
-[Live page](https://undecuple.github.io/ps3rc-feed/) · [Tests](https://github.com/undecuple/ps3rc-feed/actions/workflows/tests.yml) · [MIT licence](LICENSE)
+<p>
+  <a href="https://github.com/undecuple/ps3rc-feed/actions/workflows/tests.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/undecuple/ps3rc-feed/tests.yml?branch=main&label=tests&style=flat-square&labelColor=161b22"></a>
+  <a href="https://github.com/undecuple/ps3rc-feed/actions/workflows/pages.yml"><img alt="pages" src="https://img.shields.io/github/actions/workflow/status/undecuple/ps3rc-feed/pages.yml?branch=main&label=pages&style=flat-square&labelColor=161b22"></a>
+  <a href="https://undecuple.github.io/ps3rc-feed/"><img alt="live page" src="https://img.shields.io/badge/live%20page-open-7ee787?style=flat-square&labelColor=161b22"></a>
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/github/license/undecuple/ps3rc-feed?color=7ee787&style=flat-square&labelColor=161b22"></a>
+  <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-7ee787?style=flat-square&labelColor=161b22">
+  <a href="https://deepwiki.com/undecuple/ps3rc-feed"><img alt="DeepWiki" src="https://img.shields.io/badge/DeepWiki-undecuple%2Fps3rc--feed-7ee787?style=flat-square&labelColor=161b22"></a>
+</p>
 
 **Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data, published by hand. It is not
 real time, and the page shows its own collection time. The last collection may be incomplete, and the page says so.
