@@ -115,7 +115,7 @@ button, input { font: inherit; color: inherit; }
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 4px 0;
+  padding: 0 0 4px;
 }
 .feed { list-style: none; margin: 0; padding: 0; }
 .feed li.head { color: var(--dim); padding: 6px 8px 2px; }
@@ -131,14 +131,15 @@ button, input { font: inherit; color: inherit; }
   cursor: pointer;
 }
 .row:hover { background: var(--hover); }
+/* Column headings stay at the top of the scrolling list. */
+.colhead { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: 12ch 10ch 16ch 30ch 1fr; gap: 0 10px; padding: 4px 8px; background: var(--bar); border-bottom: 1px solid var(--line); color: var(--dim); }
 .row span { overflow-wrap: anywhere; min-width: 0; }
 .row .label { font-weight: 600; color: var(--accent); }
 .row .sum { color: var(--dim); }
 
-.tablewrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; min-width: 760px; }
 th, td { text-align: left; padding: 2px 8px; vertical-align: top; }
-th { color: var(--dim); border-bottom: 1px solid var(--line); font-weight: 400; }
+th { position: sticky; top: 0; z-index: 2; background: var(--bar); color: var(--dim); border-bottom: 1px solid var(--line); box-shadow: 0 1px 0 var(--line); font-weight: 400; }
 td .row { display: inline; padding: 0; width: auto; text-decoration: underline; color: var(--fg); }
 caption { text-align: left; padding: 4px 8px; color: var(--dim); }
 
@@ -168,6 +169,7 @@ caption { text-align: left; padding: 4px 8px; color: var(--dim); }
   .row { grid-template-columns: auto 1fr; gap: 0 10px; }
   .row .sum { grid-column: 1 / -1; padding-left: 2ch; }
   .row .game, .row .repo { grid-column: 1 / -1; }
+  .colhead { display: none; }
   .view { max-height: 60vh; }
   .prompt input { font-size: 16px; }
   .term > :not(.titlebar) { margin-left: 12px; margin-right: 12px; }
