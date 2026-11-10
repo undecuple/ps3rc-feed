@@ -197,7 +197,8 @@
     const t = now();
     let items = state.view === 'feed' ? recs.events : recs.repos;
     if (state.view === 'forks') items = items.filter((r) => r.fork === true);
-    return { all: items, shown: T.sortRecords(items.filter((r) => T.matches(r, state.filters, state.search, t)), state.sort) };
+    const kept = T.dropUntouched(items, state);
+    return { all: items, shown: T.sortRecords(kept.filter((r) => T.matches(r, state.filters, state.search, t)), state.sort), hidden: items.length - kept.length };
   }
 
   function rowButton(rec, cls) {
@@ -316,7 +317,7 @@
     recs = T.joinData({ repos: data ? data.repos : [], events: live }, now());
     const box = $('view');
     const prevTop = box.scrollTop;
-    const { all, shown } = visibleItems();
+    const { all, shown, hidden } = visibleItems();
     box.replaceChildren();
     box.setAttribute('aria-label', { feed: 'Feed', table: 'Catalog table', forks: 'Fork network', about: 'About' }[state.view]);
 
@@ -342,7 +343,7 @@
     }
 
     keepPosition(box, prevTop, opts);
-    renderChrome(all.length, shown.length);
+    renderChrome(all.length, shown.length, hidden);
   }
 
   function keepPosition(box, prevTop, opts) {
@@ -373,7 +374,7 @@
   const QUICK_SORTS = ['time', 'stars', 'commits', 'owner', 'game', 'first-seen'];
   const DESC_FIRST = ['time', 'stars', 'commits', 'first-seen'];
 
-  function renderChrome(total, count) {
+  function renderChrome(total, count, hidden) {
     const c = ctx();
     $('statusline').textContent = data
       ? 'collected ' + T.hhmm(Date.parse(data.generated_at)) + ' UTC (' + T.ago(Date.parse(data.generated_at), c.now) + ') | feed stale: ' + (c.stale ? 'yes' : 'no') + ' | connection: ' + conn + ' | times shown are source times, or collection times when the source gives none, UTC'
@@ -385,6 +386,7 @@
     toggles.replaceChildren(
       chip(state.paused ? 'resume' : 'pause', () => run(state.paused ? 'resume' : 'pause'), state.paused),
       chip('scroll: ' + state.scroll, () => run('scroll ' + (state.scroll === 'auto' ? 'manual' : 'auto'))),
+      chip('untouched forks: ' + (state.hideUntouched ? 'hidden' : 'shown'), () => run('untouched ' + (state.hideUntouched ? 'show' : 'hide')), !state.hideUntouched),
       chip('demo', () => run('demo')),
     );
     $('filter-chips').replaceChildren(...QUICK_FILTERS.map((f) => {
@@ -399,7 +401,7 @@
     }));
 
     const filtered = state.filters.length > 0 || state.search !== '';
-    $('active').textContent = 'filters: ' + T.activeSummary(state) + ' | sort: ' + T.sortLabel(state.sort) + ' | group: ' + state.group + (state.view === 'about' ? '' : ' | ' + count + ' of ' + total + ' shown');
+    $('active').textContent = 'filters: ' + T.activeSummary(state) + ' | sort: ' + T.sortLabel(state.sort) + ' | group: ' + state.group + (state.view === 'about' ? '' : ' | ' + count + ' of ' + total + ' shown' + (hidden ? ' (' + hidden + ' untouched forks hidden)' : ''));
     $('clear-filters').disabled = !filtered;
 
     const msg = state.paused ? held.length + ' new events held (paused)' : unseen > 0 ? unseen + ' new events (scrolled away)' : announce;
