@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 
 from . import schema
 
@@ -11,6 +12,7 @@ SCHEMA_VERSION = 1
 def empty_state():
     return {
         "schema_version": SCHEMA_VERSION,
+        "baseline_done": False,
         "baseline_at": None,
         "last_run_at": None,
         "repositories": {},
@@ -27,24 +29,43 @@ def empty_state():
 
 def dumps(state):
     """Canonical serialisation: sorted keys, ASCII only, stable separators."""
-    return json.dumps(state, sort_keys=True, indent=1, ensure_ascii=True) + "\n"
+    return json.dumps(state, sort_keys=True, indent=1, ensure_ascii=True, allow_nan=False) + "\n"
 
 
 def save_state(state, path):
+    """Validate, then write atomically: exclusive temp file in the same directory, fsync, replace.
+
+    Refuses to write through a symbolic link at `path`.
+    """
     schema.validate_state(state)
-    data = dumps(state)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(data)
-    os.replace(tmp, path)
+    data = dumps(state).encode("utf-8")
+    if os.path.islink(path):
+        raise OSError("refusing to write state through a symbolic link: %s" % path)
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if os.path.islink(path):
+            raise OSError("refusing to write state through a symbolic link: %s" % path)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dir_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def load_state(path):
-    with open(path, "r", encoding="utf-8") as fh:
-        try:
-            state = json.load(fh)
-        except json.JSONDecodeError as exc:
-            raise schema.SchemaError("%s: not valid JSON (%s)" % (path, exc)) from None
+    state = schema.read_json(path)
     schema.validate_state(state)
     if state["schema_version"] != SCHEMA_VERSION:
         raise schema.SchemaError("%s: unsupported schema_version %r" % (path, state["schema_version"]))

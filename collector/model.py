@@ -1,8 +1,10 @@
 """Canonical event model: types, deterministic ids and event construction.
 
 Event ids are built from the repository id plus immutable source
-identifiers (commit SHAs, release ids) or a per-repository transition
-ordinal. They never contain repository text.
+identifiers: commit SHAs (digest of the sorted set), release ids, or, for a
+state transition, the run timestamp at which the transition was observed.
+They never contain repository text and they survive state loss: replaying
+the same run files gives the same ids.
 
 Field names follow the sample in site-draft/data/feed.json where the two
 agree; the differences are listed in .local/STATUS.md.
@@ -48,6 +50,9 @@ EVENT_FIELDS = (
     "details",
 )
 
+# Commit SHAs listed in one event's details; the id digest covers all of them.
+MAX_EVENT_SHAS = 100
+
 
 def commits_event_id(repository_id, shas):
     digest = hashlib.sha256("\n".join(sorted(shas)).encode("ascii")).hexdigest()
@@ -62,9 +67,14 @@ def discovered_event_id(repository_id):
     return "repo-%d:discovered" % repository_id
 
 
-def ordinal_event_id(repository_id, kind, ordinal):
-    """Id for a state transition: the n-th transition of `kind` seen for the repository."""
-    return "repo-%d:%s:%d" % (repository_id, kind, ordinal)
+def timestamp_token(run_at):
+    """Digits of a UTC timestamp: 2026-11-07T00:00:00Z -> 20261107000000."""
+    return "".join(ch for ch in run_at if ch.isdigit())
+
+
+def transition_event_id(repository_id, kind, run_at):
+    """Id for a state transition observed in the run at `run_at`."""
+    return "repo-%d:%s:%s" % (repository_id, kind, timestamp_token(run_at))
 
 
 def make_event(event_type, obs, observed_at, source_at, summary, details, event_id):

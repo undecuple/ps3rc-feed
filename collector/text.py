@@ -1,16 +1,26 @@
 """Text handling for renderer-facing output.
 
 Repository text (descriptions, READMEs, commit messages, tags) is untrusted.
-It is stored verbatim in the observation store as data and never executed
-or interpreted. Anything that goes into a renderer-facing field (summary,
-title, game title, catalog description) passes through `escape_text`:
-control and bidirectional-format characters are removed, the length is
-bounded, Discord mention forms are neutralised and HTML is escaped. The
-result is HTML-escaped text; renderers must not escape it a second time
-and must not insert it as raw HTML either.
+It is stored in the observation store as data, bounded at load time, and
+never executed or interpreted. Anything that goes into a renderer-facing
+field (summary, title, game title, catalog description) passes through
+`escape_text`, in this order:
+
+1. NFKC normalisation, then removal of control, format, surrogate, private
+   use, unassigned, line/paragraph separator and invisible filler
+   characters; line breaks fold to spaces; runs of combining marks are
+   capped.
+2. Discord mention forms are neutralised (`@everyone...`, `@here...` in any
+   case and with any suffix, `<@`, `<#`).
+3. HTML escaping with quotes.
+4. Length bound applied after escaping, cutting only between entities.
+
+The result is HTML-escaped text; renderers must not escape it a second
+time and must not insert it as raw HTML either.
 
 URLs are never taken from repository text. They are rebuilt from the
-validated full name and immutable identifiers.
+validated full name and immutable identifiers. Every parse here is linear
+in the input length (no backtracking regular expressions over free text).
 """
 
 import html
@@ -21,50 +31,97 @@ from urllib.parse import quote
 MAX_TEXT = 300
 MAX_TITLE = 120
 MAX_KEY = 64
+MAX_COMBINING_RUN = 2
 
 GITHUB = "https://github.com/"
 
-_MENTION_RE = re.compile(r"@(?=everyone\b|here\b|&|!|[0-9])")
-_WS_RE = re.compile(r"[\r\n\t\f\v]+")
+# Zero-width and filler characters that are not in a stripped category.
+_INVISIBLE = frozenset(
+    [
+        "ᅟ",  # Hangul choseong filler
+        "ᅠ",  # Hangul jungseong filler
+        "ㅤ",  # Hangul filler
+        "ﾠ",  # halfwidth Hangul filler
+        "⠀",  # braille pattern blank
+        "­",  # soft hyphen
+    ]
+)
+_STRIP_CATEGORIES = frozenset(["Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"])
+_COMBINING = frozenset(["Mn", "Me"])
+
+_MENTION_RE = re.compile(r"@(?=everyone|here)", re.IGNORECASE)
+_LT_MENTION_RE = re.compile(r"<(?=[@#])")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-_SPACES_RE = re.compile(r" {2,}")
 
 
 def strip_controls(value):
-    """Remove control (Cc) and format (Cf) characters; fold line breaks to spaces."""
-    value = _WS_RE.sub(" ", value)
+    """Normalise and remove invisible characters; fold line breaks to spaces."""
+    value = unicodedata.normalize("NFKC", str(value))
     out = []
+    combining = 0
+    prev_space = False
     for ch in value:
-        cat = unicodedata.category(ch)
-        if cat in ("Cc", "Cf", "Cs", "Co", "Cn"):
+        if ch in ("\r", "\n", "\t", "\f", "\v"):
+            ch = " "
+        if ch in _INVISIBLE:
             continue
+        cat = unicodedata.category(ch)
+        if cat in _STRIP_CATEGORIES:
+            continue
+        if cat in _COMBINING:
+            combining += 1
+            if combining > MAX_COMBINING_RUN:
+                continue
+        else:
+            combining = 0
+        if ch == " ":
+            if prev_space:
+                continue
+            prev_space = True
+        else:
+            prev_space = False
         out.append(ch)
-    return _SPACES_RE.sub(" ", "".join(out)).strip()
-
-
-def bound(value, max_len):
-    if len(value) <= max_len:
-        return value
-    return value[: max_len - 3].rstrip() + "..."
+    return "".join(out).strip()
 
 
 def neutralise_mentions(value):
-    """Break Discord mention forms (@everyone, @here, <@id>, <@&role>, <@!id>)."""
-    return _MENTION_RE.sub("(at)", value)
+    """Break Discord mention forms: @everyone*, @here* (any case), <@...>, <#...>."""
+    value = _MENTION_RE.sub("(at)", value)
+    value = _LT_MENTION_RE.sub("<(ref)", value)
+    return value
+
+
+def bound_escaped(value, max_len):
+    """Cut HTML-escaped text to max_len without splitting an entity."""
+    if len(value) <= max_len:
+        return value
+    cut = value[: max_len - 3]
+    amp = cut.rfind("&")
+    if amp != -1 and ";" not in cut[amp:]:
+        cut = cut[:amp]
+    return cut.rstrip() + "..."
+
+
+def bound(value, max_len):
+    """Cut plain text to max_len."""
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3].rstrip() + "..."
 
 
 def plain_text(value, max_len=MAX_TEXT):
     """Sanitised plain text: controls stripped, mentions neutralised, bounded. Not HTML-escaped."""
     if value is None:
         return None
-    return bound(neutralise_mentions(strip_controls(str(value))), max_len)
+    return bound(neutralise_mentions(strip_controls(value)), max_len)
 
 
 def escape_text(value, max_len=MAX_TEXT):
-    """Renderer-safe text: `plain_text` then HTML-escaped (quotes included)."""
+    """Renderer-safe text: strip, neutralise, HTML-escape (quotes too), then bound."""
     if value is None:
         return None
-    return html.escape(plain_text(value, max_len), quote=True)
+    escaped = html.escape(neutralise_mentions(strip_controls(value)), quote=True)
+    return bound_escaped(escaped, max_len)
 
 
 def slug(value, max_len=MAX_KEY):
@@ -85,13 +142,43 @@ def commit_url(full_name, sha):
 
 
 def release_url(full_name, tag):
-    return "%s%s/releases/tag/%s" % (GITHUB, full_name, quote(plain_text(tag, 256), safe=""))
+    """Release page URL. The tag is control-stripped and percent-encoded, nothing else.
+
+    A tag that is empty, '.' or '..' after stripping gets the releases list
+    instead of a path component.
+    """
+    clean = strip_controls(tag)[:256]
+    if clean in ("", ".", ".."):
+        return "%s%s/releases" % (GITHUB, full_name)
+    return "%s%s/releases/tag/%s" % (GITHUB, full_name, quote(clean, safe=""))
 
 
 # --- classification -------------------------------------------------------
 
-_HEADING_RE = re.compile(r"^\s{0,3}#{1,2}\s+(.+?)\s*#*\s*$")
-_TITLE_PUNCT = " '’:-.,!?&()+"
+_TITLE_PUNCT = frozenset(" '’:-.,!?&()+")
+MAX_HEADING_LINE = 1024
+
+
+def heading_text(line):
+    """Text of a level-1 or level-2 ATX heading, or None. Linear scan, no regex."""
+    line = line[:MAX_HEADING_LINE]
+    i = 0
+    while i < 3 and i < len(line) and line[i] == " ":
+        i += 1
+    j = i
+    while j < len(line) and line[j] == "#":
+        j += 1
+    level = j - i
+    if level < 1 or level > 2:
+        return None
+    if j >= len(line) or line[j] not in (" ", "\t"):
+        return None
+    rest = line[j:].strip()
+    k = len(rest)
+    while k > 0 and rest[k - 1] == "#":
+        k -= 1
+    rest = rest[:k].rstrip()
+    return rest or None
 
 
 def plausible_title(value):
@@ -113,9 +200,9 @@ def readme_title(readme_excerpt):
     if not readme_excerpt:
         return None
     for line in readme_excerpt.splitlines():
-        m = _HEADING_RE.match(line)
-        if m:
-            title = plain_text(m.group(1), MAX_TITLE)
+        heading = heading_text(line)
+        if heading is not None:
+            title = plain_text(heading, MAX_TITLE)
             return title if plausible_title(title) else None
     return None
 
@@ -132,9 +219,9 @@ def classify(full_name, description, readme_excerpt):
     toolkit_name = "ps3recomp" if "ps3recomp" in haystack else None
     toolkit = {"name": toolkit_name, "confidence": "weak" if toolkit_name else "unknown"}
 
+    unknown = {"key": None, "title": None, "basis": None, "confidence": "unknown", "inferred": True, "verified": False}
     if "ps3recomp" in name:
-        game = {"key": None, "title": None, "basis": None, "confidence": "unknown", "inferred": True, "verified": False}
-        return "framework", game, toolkit
+        return "framework", unknown, toolkit
 
     title = readme_title(readme_excerpt)
     key = slug(title)
@@ -148,5 +235,4 @@ def classify(full_name, description, readme_excerpt):
             "verified": False,
         }
         return "game", game, toolkit
-    game = {"key": None, "title": None, "basis": None, "confidence": "unknown", "inferred": True, "verified": False}
-    return "unclassified", game, toolkit
+    return "unclassified", unknown, toolkit

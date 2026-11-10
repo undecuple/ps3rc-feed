@@ -36,7 +36,9 @@ class ClassificationChangeTests(CollectorTestCase):
         change = events[2][0]
         self.assertEqual(change["details"]["previous_key"], "skyfall")
         self.assertEqual(change["details"]["new_key"], "totally-different-game")
-        self.assertEqual(change["event_id"], "repo-100:game_association:1")
+        # Transition ids carry the run timestamp, not a counter, so they
+        # survive state loss and a replay of the same runs.
+        self.assertEqual(change["event_id"], "repo-100:game_association:20261106000000")
         # Stable id on a second full run.
         _, events_b = run_runs(runs)
         self.assertEqual(events_b[2][0]["event_id"], change["event_id"])
@@ -118,8 +120,15 @@ class HostileTextTests(CollectorTestCase):
         obs = state["repositories"]["666"]
         self.assertEqual(obs["description"], src["description"])
         self.assertEqual(obs["readme_excerpt"], src["readme_excerpt"])
+        from collector import schema
+
+        # Stored as data, verbatim up to the load-time bound (cut, not altered).
         for commit in src["commits"]:
-            self.assertEqual(obs["observed_commits"][commit["sha"]]["message"], commit["message"])
+            self.assertEqual(
+                obs["observed_commits"][commit["sha"]]["message"],
+                commit["message"][: schema.MAX_MESSAGE],
+            )
+        self.assertTrue(any(len(c["message"]) > schema.MAX_MESSAGE for c in src["commits"]))
         e = events[1][0]
         # Renderer-facing fields never carry raw repository text.
         hostile = [src["description"], src["readme_excerpt"]] + [c["message"] for c in src["commits"]]
@@ -154,8 +163,12 @@ class HostileTextTests(CollectorTestCase):
         self.assertEqual(text.escape_text("line1\r\nline2\x00nul"), "line1 line2nul")
         self.assertEqual(text.escape_text("‮gnp.exe"), "gnp.exe")
         self.assertEqual(text.escape_text("<b>"), "&lt;b&gt;")
-        self.assertNotIn("@everyone", text.escape_text("@everyone @here <@1> <@&2>"))
-        self.assertNotIn("<@", text.escape_text("@everyone @here <@1> <@&2>"))
+        # Assert on the neutralised forms: "<" is escaped anyway, so a
+        # missing "<@" proves nothing on its own.
+        out = text.escape_text("@everyone @here <@1> <@!2> <@&3> <#4>")
+        self.assertEqual(out, "(at)everyone (at)here &lt;(ref)@1&gt; &lt;(ref)@!2&gt; &lt;(ref)@&amp;3&gt; &lt;(ref)#4&gt;")
+        self.assertNotIn("@everyone", out)
+        self.assertNotIn("&lt;@", out)
 
     def test_t25_event_ids_contain_no_free_text(self):
         state, events, outputs = self._outputs()
