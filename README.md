@@ -59,7 +59,10 @@ Not built yet: RSS and Discord feeds.
         --state-in data/state.json --state-out data/state.json --stale-after-minutes 1500
 
 A live run needs `--max-requests` and `--out` under `data/`, and either `GITHUB_TOKEN` or `--anonymous`. A token with
-no permissions is enough for public data. Put it in the environment of the command and never in a file. The collector
+no permissions is enough for public data. Put it in the environment of the command and never in a file. The token must
+be 1-4096 characters of letters, digits, `_`, `-` and `.`: classic `ghp_` and `github_pat_` tokens fit, and so does the
+Actions `GITHUB_TOKEN` (`ghs_` and a dotted text of about 520 characters). Anything else is refused with the allowed
+form and the observed length only, never any character of the value. The collector
 refuses the placeholder example config. The live write path uses POSIX file operations, so it targets Linux and macOS.
 
 `data/` is ignored by git. Run files are never committed.

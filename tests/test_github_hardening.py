@@ -113,7 +113,7 @@ class K1TokenHygiene(CollectorTestCase):
     def test_secret_rejects_malformed_tokens_without_echoing_them(self):
         from collector import github
 
-        for bad in ("SENTINEL\r", "SENTINEL\n", "SENT INEL", "SENTINELé", "", "x" * 256, "tok:en", "a.b", "\tSENTINEL"):
+        for bad in ("SENTINEL\r", "SENTINEL\n", "SENT INEL", "SENTINELé", "", "x" * 4097, "tok:en", "a/b", "\tSENTINEL"):
             with self.assertRaises(ValueError, msg=repr(bad)) as ctx:
                 github.Secret(bad)
             self.assertNotIn("SENTINEL", str(ctx.exception))

@@ -39,10 +39,14 @@ strict JSON (no duplicate keys, no NaN/Infinity), shape checked against
 what the endpoint promises; errors name the request path and never
 include a body or a header.
 
-The token is wrapped in `Secret`: it must be 1-255 characters of letters,
-digits, '_' or '-' (GitHub tokens fit this), its repr and str are
-redacted, and its text is written only into the Authorization header
-handed to the transport.
+The token is wrapped in `Secret`: it must be 1-4096 characters of letters,
+digits, '_', '-' or '.' (classic ghp_ and github_pat_ tokens fit this, and
+so do installation tokens such as the Actions GITHUB_TOKEN, which are
+ghs_ followed by a JWT-like text of about 520 characters with '.'
+between its parts; GitHub sets no upper length, 4096 is this client's
+bound). A refusal states the allowed form and the observed length, never
+a character of the value. Its repr and str are redacted, and its text is
+written only into the Authorization header handed to the transport.
 """
 
 import http.client
@@ -76,7 +80,9 @@ SEARCH = "search"
 CODE_SEARCH = "code_search"
 CODE_SEARCH_PATH = "/search/code"
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{1,255}\Z")
+MAX_TOKEN_LENGTH = 4096
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]{1,%d}\Z" % MAX_TOKEN_LENGTH)
+TOKEN_FORM = "1-%d characters of letters, digits, '_', '-' and '.'" % MAX_TOKEN_LENGTH
 _PRINTABLE_RE = re.compile(r"[\x21-\x7e]{1,2048}\Z")
 _PATH_RE = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*\Z")
 _BAD_ESCAPE_RE = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
@@ -131,8 +137,11 @@ class Secret:
     __slots__ = ("_value",)
 
     def __init__(self, value):
-        if not isinstance(value, str) or _TOKEN_RE.fullmatch(value) is None:
-            raise ValueError("token has an unexpected form (allowed: 1-255 characters of letters, digits, '_' and '-')")
+        if not isinstance(value, str):
+            raise ValueError("token has an unexpected form (allowed: %s; got a non-string value)" % TOKEN_FORM)
+        if _TOKEN_RE.fullmatch(value) is None:
+            # Only the length is reported: no character of the value goes into the message.
+            raise ValueError("token has an unexpected form (allowed: %s; got %d characters)" % (TOKEN_FORM, len(value)))
         self._value = value
 
     def reveal(self):
