@@ -2,7 +2,8 @@
   "_comment": "Placeholders only. Every name here is fictional and the live collector refuses a config that still uses any of them. The reviewed config for the scheduled job is config/sources.json.",
   "queries": [
     "example-recomp-placeholder in:name",
-    {"q": "example-recomp-placeholder in:description", "require_any": ["example-cue-placeholder"]}
+    {"q": "example-recomp-placeholder in:description", "require_any": ["example-cue-placeholder"]},
+    {"kind": "code", "q": "filename:example-licence-placeholder", "require_any": ["example-cue-placeholder"]}
   ],
   "roots": [
     {"repository_id": 1, "full_name": "example-org/example-recomp-placeholder"}
@@ -18,5 +19,5 @@
   "max_requests": 500,
   "max_repositories": 500,
   "readme_bytes": 16384,
-  "page_caps": {"search": 10, "forks": 10, "commits": 5}
+  "page_caps": {"search": 10, "code": 1, "forks": 10, "commits": 5}
 }

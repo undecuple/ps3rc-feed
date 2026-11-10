@@ -85,23 +85,35 @@ never values from the file.
   characters each, single inner spaces only, no duplicates. Pick terms that name the game, not the word the query
   searches for (a `helghast` query must not use `helghast` as a term, or every result passes), and never list
   repository names as terms: use `include` for one repository.
+  A code query is `{"kind": "code", "q": "<code search query>"}`, with an optional `require_any` matched the same way
+  against the name and description of the repository holding the file. It asks GitHub's code search (`GET
+  /search/code`) and finds repositories by a file they contain, for example one that vendors a licence file without
+  naming the toolkit in its name or description. Its entry in the run says `"kind": "code"`; that records how the
+  repository was found, not that it is a recompilation. Code search needs a token: with `--anonymous` code queries are
+  left out of the plan (it says how many in `skipped_code_queries`) and not asked, and the run is incomplete (the
+  search entry says `"skipped": "no_token"`, the report counts `skipped_searches`). Code search has its own rate limit
+  (about 10 requests a minute), separate from the search limit, so either running out leaves the other kind going.
+  Repository search items carry no README text: a query with `in:readme` cannot use `require_any` and stays a plain
+  string.
 - `roots`: `{"repository_id", "full_name"}` repositories whose fork network is walked.
 - `include`: `{"repository_id", "full_name"}` repositories fetched even when no search or fork walk returns them.
   They cost the same four requests as any candidate (metadata by id, commits, releases, readme) and no lookup.
 - `deny`: `{"repositories": ["owner/name", ...], "owners": ["login", ...]}`, matched case-insensitively against the
   name the listing gave, before anything is fetched. Denied ids are left out of the run's listings and counted in
   `collection_report.denied`. Roots and included repositories cannot be denied (the config is refused).
-- `max_requests`, `max_repositories`, `commit_window_days`, `readme_bytes`, `page_caps` (`search`, `forks`,
-  `commits` pages per listing): the budget. A repository costs about four requests; candidates are fetched in
+- `max_requests`, `max_repositories`, `commit_window_days`, `readme_bytes`, `page_caps` (`search`, `code` (1 to 3,
+  default 1), `forks`, `commits` pages per listing): the budget. A repository costs about four requests; candidates are fetched in
   ascending id order and those past `max_repositories` are reported as not fetched.
 
 ### Reviewing a change to `config/sources.json`
 
 1. Run `python3 -B -m collector collect --config config/sources.json` (no network): the config must load, and the
-   plan lists one search per query, one forks walk per root and one metadata request per root and include entry.
+   plan lists one search per query (`/search/code` for a code query), one forks walk per root and one metadata
+   request per root and include entry.
 2. Check the budget: `max_requests` stays under the token's hourly limit with margin (the job's built-in token
-   allows 1000 requests an hour, search 30 a minute), and searches x `page_caps.search` + roots x `page_caps.forks` +
-   4 x `max_repositories` fits in `max_requests`.
+   allows 1000 requests an hour, search 30 a minute, code search 10 a minute), and repository searches x
+   `page_caps.search` + code searches x `page_caps.code` + roots x `page_caps.forks` + 4 x `max_repositories` fits in
+   `max_requests`. For the committed config: 7 x 3 + 1 x 1 + 1 x 10 = 32, plus 4 x 190 = 760, is 792 of 800.
 3. For a new or changed `require_any`, list which repositories of a recent run file the terms keep and which they
    drop, and say why for every borderline case. Terms describe the game; repository names are not terms.
 4. Update the expectations in `tests/test_sources_config.py` in the same change, and run the tests.

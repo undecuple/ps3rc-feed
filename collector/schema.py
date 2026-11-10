@@ -55,7 +55,16 @@ FETCH_STATES = ("ok", "rate_limited", "not_found", "blocked", "failed")
 COLLECTION_STATES = ("ok", "partial", "failing", "stale", "not_found")
 # Why a collection did not finish. search_rate_limited: the search bucket ran
 # out and the searches were cut short while the run continued on other endpoints.
-STOP_REASONS = ("rate_limited", "budget", "network", "search_rate_limited")
+# code_search_rate_limited: the same for the separate code search bucket.
+STOP_REASONS = ("rate_limited", "budget", "network", "search_rate_limited", "code_search_rate_limited")
+# Search kinds a run records. A search without `kind` is a repository search
+# (GET /search/repositories); "code" is GET /search/code, whose ids are the
+# repositories holding a matching file: discovery provenance only, no claim
+# about the repository.
+SEARCH_KINDS = ("code",)
+# Why a search was not asked. no_token: code search needs an authenticated
+# request and the run had no token.
+SKIP_REASONS = ("no_token",)
 
 
 class SchemaError(ValueError):
@@ -499,8 +508,11 @@ SEARCH = Obj(
         # A query with require_any terms: distinct listed ids its filter left out
         # (they are not in repository_ids and were not fetched for this query).
         "filtered_out": NonNegInt(),
+        # Absent in older runs and for repository searches.
+        "kind": Enum(SEARCH_KINDS),
+        "skipped": Enum(SKIP_REASONS),
     },
-    optional=("resume_cursor", "filtered_out"),
+    optional=("resume_cursor", "filtered_out", "kind", "skipped"),
 )
 REJECTED = Obj({"path": Str(pattern=PATH_RE, max_len=128), "reason": Enum(REJECTION_REASONS)})
 MAX_REJECTED = 100
@@ -527,8 +539,10 @@ RUN = Obj(
                 # config's deny list. Neither makes a run incomplete. Absent in older runs.
                 "filtered_out": NonNegInt(),
                 "denied": NonNegInt(),
+                # Searches not asked at all (see a search's `skipped`). Makes the run incomplete.
+                "skipped_searches": NonNegInt(),
             },
-            optional=("filtered_out", "denied"),
+            optional=("filtered_out", "denied", "skipped_searches"),
         ),
     },
     optional=("fictional", "rejected_fields", "collection_report"),
@@ -555,6 +569,8 @@ def validate_run(run):
     for i, search in enumerate(run["searches"]):
         if "://" in search["query"] or _SCHEME_RE.match(search["query"]) is not None:
             raise SchemaError("run.searches[%d].query: a search query must not contain a URL" % i)
+        if "skipped" in search and (search.get("kind") != "code" or search["complete"] or search["repository_ids"]):
+            raise SchemaError("run.searches[%d]: only a code search can be skipped, and a skipped search is incomplete and empty" % i)
         cursor = search.get("resume_cursor")
         if cursor is not None and CURSOR_RE.fullmatch(cursor) is None:
             search["resume_cursor"] = None

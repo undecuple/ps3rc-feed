@@ -12,6 +12,23 @@ Order of work in `collect`:
    when that bucket is exhausted the remaining searches are marked
    complete=false with a resume cursor and the run goes on with the other
    endpoints; the report says search_rate_limited.
+   A code query ({"kind": "code", "q": ...}) is GET /search/code instead
+   (per_page 100, page cap `page_caps.code`, 1 by default, at most 3). It
+   draws from GitHub's code_search bucket (about 10 a minute), handled
+   like the search bucket but separately (code_search_rate_limited), so
+   either running out leaves the other kind of search running. Each item
+   is a file; its `repository` gives the id (no usable id: the item is
+   dropped) and the name and description `require_any` is matched
+   against. A repository listed for several files is one id, and an id
+   from any search or fork walk is one candidate. An item whose
+   repository has no usable full_name keeps its id only: it is fetched
+   when another listing or the config names it, and is otherwise reported
+   not fetched. total_count counts files, so it is compared with the
+   items listed. The search entry carries "kind": "code": discovery
+   provenance (the repository holds a matching file), nothing more.
+   Code search needs a token: without one a code query is not asked, its
+   entry says skipped "no_token" and the run is incomplete
+   (collection_report.skipped_searches).
 2. Roots: GET /repos/{owner}/{repo}/forks per configured root (per_page
    100, page cap). A capped or interrupted walk sets forks_scan_complete
    false and a resume_cursor "page=N".
@@ -108,23 +125,33 @@ class Term(schema.Type):
 
 
 FILTERED_QUERY = schema.Obj({"q": schema.QUERY, "require_any": schema.List(Term(), MAX_TERMS)})
+# A code search: {"kind": "code", "q": query}, optionally with require_any (matched like a repository query's).
+CODE_QUERY = schema.Obj(
+    {"kind": schema.Enum(("code",)), "q": schema.QUERY, "require_any": schema.List(Term(), MAX_TERMS)},
+    optional=("require_any",),
+)
+
+
+def _query_shape(entry):
+    """The schema of a query object: a code query when it has a `kind`, else a filtered repository query."""
+    return CODE_QUERY if "kind" in entry else FILTERED_QUERY
 
 
 class QueryEntry(schema.Type):
-    """A search query: a plain string, or {"q": query, "require_any": [term, ...]}."""
+    """A search query: a plain string, {"q": query, "require_any": [term, ...]}, or {"kind": "code", "q": query}."""
 
     def check(self, value, path):
         if isinstance(value, str):
             return schema.QUERY.check(value, path)
         if isinstance(value, dict):
-            return FILTERED_QUERY.check(value, path)
+            return _query_shape(value).check(value, path)
         raise schema.SchemaError("%s: expected a query string or a query object, got %s" % (path, schema._kind(value)))
 
 
 ROOT_CONFIG = schema.Obj({"repository_id": schema.PositiveId(), "full_name": schema.FULL_NAME})
 PAGE_CAPS = schema.Obj(
-    {"search": schema.Int(1, 10), "forks": schema.Int(1, 100), "commits": schema.Int(1, 50)},
-    optional=("search", "forks", "commits"),
+    {"search": schema.Int(1, 10), "code": schema.Int(1, 3), "forks": schema.Int(1, 100), "commits": schema.Int(1, 50)},
+    optional=("search", "code", "forks", "commits"),
 )
 DENY = schema.Obj(
     {
@@ -187,7 +214,8 @@ def validate_config(config):
     queries = config.get("queries")
     if isinstance(queries, list):
         for i, query in enumerate(queries):
-            _count_unknown(query, FILTERED_QUERY.fields, "config.queries[%d]" % i)
+            if isinstance(query, dict):
+                _count_unknown(query, _query_shape(query).fields, "config.queries[%d]" % i)
     CONFIG.check(config, "config")
     if not config["queries"] and not config["roots"]:
         raise schema.SchemaError("config: at least one query or one root is required")
@@ -195,8 +223,8 @@ def validate_config(config):
         query = query_text(entry)
         if "://" in query or schema._SCHEME_RE.match(query) is not None:
             raise schema.SchemaError("config.queries[%d]: a search query must not contain a URL" % i)
-        if isinstance(entry, dict):
-            terms = [t.casefold() for t in entry["require_any"]]
+        if query_terms(entry) is not None:
+            terms = [t.casefold() for t in query_terms(entry)]
             if not terms:
                 raise schema.SchemaError("config.queries[%d].require_any: at least one term is required" % i)
             if len(set(terms)) != len(terms):
@@ -247,13 +275,22 @@ def _normalise_name(value):
 
 
 def query_text(entry):
-    """The search string of a query entry (a plain string or a {"q", "require_any"} object)."""
+    """The search string of a query entry (a plain string or a query object)."""
     return entry["q"] if isinstance(entry, dict) else entry
 
 
 def query_terms(entry):
-    """The require_any terms of a query entry, or None for a plain (unfiltered) query."""
-    return entry["require_any"] if isinstance(entry, dict) else None
+    """The require_any terms of a query entry, or None for an unfiltered query."""
+    return entry.get("require_any") if isinstance(entry, dict) else None
+
+
+def query_kind(entry):
+    """The kind of a query entry: "code" (GET /search/code) or "repositories" (GET /search/repositories)."""
+    return "code" if isinstance(entry, dict) and entry.get("kind") == "code" else "repositories"
+
+
+SEARCH_PATHS = {"repositories": "/search/repositories", "code": github.CODE_SEARCH_PATH}
+SEARCH_CAPS = {"repositories": "search", "code": "code"}
 
 
 def is_relevant(full_name, description, terms):
@@ -280,12 +317,20 @@ def is_denied(full_name, deny):
     return name.split("/")[0] in set(o.lower() for o in deny["owners"])
 
 
+# Qualifiers whose value names something (a file, a path, a repository or an account): their values are
+# tokens, so a placeholder in `filename:example-...` is found. Other qualifiers (in:name, fork:true) are not.
+NAMING_QUALIFIERS = ("filename", "path", "repo", "user", "org")
+
+
 def _tokens(value):
-    """Lower-cased word tokens of a name or query; search qualifiers (words with ':') are not tokens."""
+    """Lower-cased word tokens of a name or query; search qualifiers (words with ':') are not tokens,
+    except the values of NAMING_QUALIFIERS."""
     tokens = set()
     for word in _normalise_name(value).split(" "):
         if ":" in word:
-            continue
+            key, word = word.split(":", 1)
+            if key not in NAMING_QUALIFIERS:
+                continue
         tokens.update(t for t in _TOKEN_SPLIT_RE.split(word) if t)
     return tokens
 
@@ -336,11 +381,18 @@ def config_uses_example_names(config, path=EXAMPLE_CONFIG_PATH):
     return found
 
 
-def plan_requests(config):
-    """The requests a run starts with; later ones depend on what these return."""
+def plan_requests(config, authenticated=True):
+    """The requests a run starts with; later ones depend on what these return.
+
+    Without a token (`authenticated` false) code queries are left out: code
+    search refuses unauthenticated requests, and collect() skips them too.
+    """
     plan = []
     for query in config["queries"]:
-        plan.append({"method": "GET", "path": "/search/repositories", "query": github.canonical_query({"q": query_text(query), "per_page": PER_PAGE, "page": 1})})
+        kind = query_kind(query)
+        if kind == "code" and not authenticated:
+            continue
+        plan.append({"method": "GET", "path": SEARCH_PATHS[kind], "query": github.canonical_query({"q": query_text(query), "per_page": PER_PAGE, "page": 1})})
     for root in config["roots"]:
         plan.append({"method": "GET", "path": github.path_for_repo(root["full_name"], "/forks"), "query": github.canonical_query({"per_page": PER_PAGE, "page": 1})})
     for root in config["roots"] + config.get("include", []):
@@ -528,9 +580,13 @@ class _Stop(Exception):
 
 _STOPS = (github.RateLimited, github.BudgetExhausted, github.NetworkFailed)
 _FAILURES = (github.ResponseError, github.TransportFailed, github.TransportRefused)
-# Reasons that end the whole run; the search bucket running out does not.
+# Reasons that end the whole run; a search bucket running out does not.
 _RUN_STOPS = ("rate_limited", "budget", "network")
 SEARCH_STOP = "search_rate_limited"
+CODE_SEARCH_STOP = "code_search_rate_limited"
+SEARCH_STOPS = (SEARCH_STOP, CODE_SEARCH_STOP)
+# The bucket stop that ends the searches of a kind.
+KIND_STOPS = {"repositories": SEARCH_STOP, "code": CODE_SEARCH_STOP}
 
 
 def _failure_kind(exc):
@@ -549,7 +605,9 @@ def collect(client, config, run_at):
     run = {"run_at": run_at, "roots": [], "searches": [], "repositories": []}
     report = {
         "stopped": None,
-        "search_stopped": False,
+        # Search bucket stops seen (search_rate_limited, code_search_rate_limited).
+        "search_stops": set(),
+        "skipped_searches": 0,
         "errors": [],
         "error_count": 0,
         "dropped_items": 0,
@@ -560,7 +618,10 @@ def collect(client, config, run_at):
     }
     names = {}
     candidates = set()
+    # Code search ids whose item gave no usable full_name: fetched only when another listing names them.
+    unnamed = set()
     root_ids = set(r["repository_id"] for r in config["roots"])
+    authenticated = getattr(client, "token", None) is not None
 
     def note_error(path, reason):
         report["error_count"] += 1
@@ -605,12 +666,44 @@ def collect(client, config, run_at):
             names.setdefault(rid, full_name)
         return ids, listed
 
+    def code_ids(items, path, terms=None):
+        """(ids kept, distinct ids listed) of code search items, by each item's `repository`.
+
+        An item without a repository object or a valid repository id is
+        dropped. An item whose repository has an unusable full_name keeps its
+        id only (it is not named, so it is fetched only when another listing
+        names it). With `terms`, the repository's name and description are
+        matched as for a repository search.
+        """
+        ids = []
+        listed = set()
+        for item in items:
+            repo = item.get("repository") if isinstance(item, dict) else None
+            try:
+                rid = _id(repo, "id", path)
+            except github.ResponseError:
+                report["dropped_items"] += 1
+                continue
+            try:
+                full_name = _full_name(repo, path)
+            except github.ResponseError:
+                full_name = None
+            listed.add(rid)
+            if terms is not None and not is_relevant(full_name or "", repo.get("description"), terms):
+                continue
+            ids.append(rid)
+            if full_name is None:
+                unnamed.add(rid)
+            else:
+                names.setdefault(rid, full_name)
+        return ids, listed
+
     def after_pages(path, pages):
         """A run stop seen mid-walk ends the run; a search-bucket stop is noted; other interruptions are errors."""
         if pages.stopped in _RUN_STOPS:
             raise _Stop(pages.stopped, True)
-        if pages.stopped == SEARCH_STOP:
-            report["search_stopped"] = True
+        if pages.stopped in SEARCH_STOPS:
+            report["search_stops"].add(pages.stopped)
             return
         if pages.stopped is not None:
             note_error(path, pages.stopped)
@@ -638,49 +731,63 @@ def collect(client, config, run_at):
 
     try:
         for query_entry in config["queries"]:
-            query, terms = query_text(query_entry), query_terms(query_entry)
+            query, terms, kind = query_text(query_entry), query_terms(query_entry), query_kind(query_entry)
+            path, bucket_stop = SEARCH_PATHS[kind], KIND_STOPS[kind]
             entry = {"query": query, "complete": False, "repository_ids": []}
+            if kind == "code":
+                entry["kind"] = "code"
             if terms is not None:
                 entry["filtered_out"] = 0
             run["searches"].append(entry)
-            if report["search_stopped"]:
-                # The search bucket is exhausted: do not ask, record where to resume.
+            if kind == "code" and not authenticated:
+                # Code search refuses requests without a token: not asked, and the run is incomplete.
+                entry["skipped"] = "no_token"
+                entry["resume_cursor"] = "page=1"
+                report["skipped_searches"] += 1
+                continue
+            if bucket_stop in report["search_stops"]:
+                # This kind's bucket is exhausted: do not ask, record where to resume.
                 entry["resume_cursor"] = "page=1"
                 continue
             try:
-                pages, failed = attempt("/search/repositories", client.paginate, "/search/repositories", {"q": query, "per_page": PER_PAGE}, caps["search"], "object", "items")
+                pages, failed = attempt(path, client.paginate, path, {"q": query, "per_page": PER_PAGE}, caps[SEARCH_CAPS[kind]], "object", "items")
             except _Stop as stop:
-                if stop.reason != SEARCH_STOP:
+                if stop.reason not in SEARCH_STOPS:
                     raise
-                report["search_stopped"] = True
+                report["search_stops"].add(stop.reason)
                 entry["resume_cursor"] = "page=1"
                 continue
             if failed or pages.items is None:
                 if not failed:
-                    after_pages("/search/repositories", pages)
-                    if pages.stopped == SEARCH_STOP:
+                    after_pages(path, pages)
+                    if pages.stopped in SEARCH_STOPS:
                         entry["resume_cursor"] = "page=1"
                     elif pages.stopped is None:
-                        note_error("/search/repositories", "status")
+                        note_error(path, "status")
                 continue
             before = report["dropped_items"]
             items, overflow = capped(pages.items, "search")
-            ids, listed = listed_ids(items, "/search/repositories", terms)
+            if kind == "code":
+                ids, listed = code_ids(items, path, terms)
+            else:
+                ids, listed = listed_ids(items, path, terms)
             entry["repository_ids"] = sorted(set(ids))[: schema.MAX_IDS]
             if terms is not None:
                 entry["filtered_out"] = len(listed) - len(set(ids))
                 report["filtered_out"] += entry["filtered_out"]
-            candidates.update(entry["repository_ids"])
+            candidates.update(i for i in entry["repository_ids"] if i not in unnamed)
             total = pages.extra.get("total_count")
             incomplete = pages.extra.get("incomplete_results")
             clean = report["dropped_items"] == before
             # total_count above the distinct ids listed covers the API's 1000-result ceiling too.
             # Ids the filter left out were listed: they count here, so a filter never makes a search look cut short.
-            capped_total = isinstance(total, int) and not isinstance(total, bool) and total > len(listed)
+            # A code search counts files, several of which may be in one repository: compare with the items listed.
+            seen = len(items) if kind == "code" else len(listed)
+            capped_total = isinstance(total, int) and not isinstance(total, bool) and total > seen
             entry["complete"] = bool(pages.complete and clean and not overflow and incomplete is not True and not capped_total)
             if not pages.complete and pages.next_cursor is not None:
                 entry["resume_cursor"] = pages.next_cursor
-            after_pages("/search/repositories", pages)
+            after_pages(path, pages)
 
         for root in config["roots"]:
             rid, full_name = root["repository_id"], root["full_name"]
@@ -706,6 +813,8 @@ def collect(client, config, run_at):
             candidates.update(entry["found_repository_ids"])
             after_pages(path, pages)
 
+        # A code search id without a name is fetched when another listing (or the config) named it.
+        candidates.update(rid for rid in unnamed if rid in names)
         apply_deny()
         candidates.update(include_ids)
         ordered = sorted(candidates)
@@ -722,7 +831,7 @@ def collect(client, config, run_at):
             except _Stop as stop:
                 if stop.requested:
                     # The request was made and refused: that is a real failure state.
-                    state = "rate_limited" if stop.reason in ("rate_limited", SEARCH_STOP) else "failed"
+                    state = "rate_limited" if stop.reason in ("rate_limited",) + SEARCH_STOPS else "failed"
                     run["repositories"].append(_empty_repository(rid, full_name, state))
                 raise
             if failed or result.status != 200:
@@ -775,11 +884,16 @@ def collect(client, config, run_at):
             elif not failed and result.status != 404:
                 note_error(dpath, "status")
     except _Stop as stop:
-        # The search phase handles its own bucket; a search limit raised anywhere else ends the run.
-        report["stopped"] = "rate_limited" if stop.reason == SEARCH_STOP else stop.reason
+        # The search phase handles its own buckets; a search limit raised anywhere else ends the run.
+        report["stopped"] = "rate_limited" if stop.reason in SEARCH_STOPS else stop.reason
 
-    if report["stopped"] is None and report["search_stopped"]:
-        report["stopped"] = SEARCH_STOP
+    if report["stopped"] is None and report["search_stops"]:
+        # Both buckets may have run out: the repository search bucket is named first.
+        report["stopped"] = SEARCH_STOP if SEARCH_STOP in report["search_stops"] else CODE_SEARCH_STOP
+    report["search_stopped"] = bool(report["search_stops"])
+    report["search_stops"] = sorted(report["search_stops"])
+    # Code search ids nobody named are recorded in their search but never fetched.
+    report["not_fetched_repository_ids"].extend(sorted(rid for rid in unnamed if rid not in names))
     # A stop before the candidates were chosen: still keep denied ids out, and count included ones as not fetched.
     apply_deny()
     listed = set(r["repository_id"] for r in run["repositories"])
@@ -790,6 +904,7 @@ def collect(client, config, run_at):
         report["stopped"] is None
         and report["error_count"] == 0
         and report["dropped_items"] == 0
+        and report["skipped_searches"] == 0
         and not report["not_fetched_repository_ids"]
         and all(s["complete"] for s in run["searches"])
         and all(r["forks_scan_complete"] for r in run["roots"])
@@ -805,6 +920,8 @@ def collect(client, config, run_at):
         "filtered_out": min(report["filtered_out"], schema.MAX_SAFE_INT),
         "denied": report["denied"],
     }
+    if report["skipped_searches"]:
+        run["collection_report"]["skipped_searches"] = report["skipped_searches"]
     try:
         run = schema.validate_run(run)
     except schema.SchemaError:

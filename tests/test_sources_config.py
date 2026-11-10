@@ -408,18 +408,29 @@ class CommittedConfig(CollectorTestCase):
 
         c = self.config
         self.assertEqual(c["roots"], [{"repository_id": 1178514664, "full_name": "sp00nznet/ps3recomp"}])
-        self.assertEqual(c["queries"][:2], ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true"])
-        self.assertEqual(list(self.terms), ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true", "killzone in:name", "killzone in:description", "helghast in:name", "helghast in:description"])
+        self.assertEqual(c["queries"][:4], ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true", "ps3recomp in:readme fork:true", {"kind": "code", "q": "filename:ps3recomp-LICENSE.txt"}])
+        self.assertEqual(
+            list(self.terms),
+            ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true", "ps3recomp in:readme fork:true", "filename:ps3recomp-LICENSE.txt", "killzone in:name", "killzone in:description", "helghast in:name", "helghast in:description"],
+        )
+        self.assertEqual([collect.query_kind(q) for q in c["queries"]].count("code"), 1)
         self.assertEqual((c["include"], c["deny"]), ([], {"repositories": [], "owners": []}))
         self.assertEqual((c["max_requests"], c["max_repositories"], c["commit_window_days"], c["readme_bytes"]), (800, 190, 30, 16384))
-        self.assertEqual(c["page_caps"], {"search": 3, "forks": 10, "commits": 3})
+        self.assertEqual(c["page_caps"], {"search": 3, "code": 1, "forks": 10, "commits": 3})
         self.assertEqual(collect.config_uses_example_names(c), [])
 
     def test_the_budget_fits_the_built_in_token_with_margin(self):
+        from collector import collect
+
         c = self.config
-        searches = len(c["queries"]) * c["page_caps"]["search"]
+        kinds = [collect.query_kind(q) for q in c["queries"]]
+        searches = kinds.count("repositories") * c["page_caps"]["search"]
+        code = kinds.count("code") * c["page_caps"]["code"]
         self.assertLessEqual(searches, 30)  # one minute of the search bucket
-        fixed = searches + len(c["roots"]) * c["page_caps"]["forks"]
+        self.assertLessEqual(code, 10)  # one minute of the code search bucket
+        # 7 x 3 + 1 x 1 + 1 x 10 = 32 fixed; + 4 x 190 = 792 <= 800.
+        fixed = searches + code + len(c["roots"]) * c["page_caps"]["forks"]
+        self.assertEqual((searches, code, fixed), (21, 1, 32))
         self.assertLessEqual(fixed + 4 * c["max_repositories"], c["max_requests"])
         self.assertLessEqual(c["max_requests"], 800)
 
@@ -429,7 +440,7 @@ class CommittedConfig(CollectorTestCase):
         def q(text):
             return "page=1&per_page=100&q=" + text.replace(" ", "+").replace(":", "%3A")
 
-        expected = [{"method": "GET", "path": "/search/repositories", "query": q(t)} for t in self.terms]
+        expected = [{"method": "GET", "path": "/search/code" if t.startswith("filename:") else "/search/repositories", "query": q(t)} for t in self.terms]
         expected.append({"method": "GET", "path": "/repos/sp00nznet/ps3recomp/forks", "query": "page=1&per_page=100"})
         expected.append({"method": "GET", "path": "/repositories/1178514664", "query": ""})
         self.assertEqual(collect.plan_requests(self.config), expected)
@@ -439,11 +450,20 @@ class CommittedConfig(CollectorTestCase):
 
         code, out, err = _run_cli(["collect", "--config", SOURCES])
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(json.loads(out)["plan"]), 8)
+        self.assertEqual(len(json.loads(out)["plan"]), 10)
+        self.assertNotIn("skipped_code_queries", json.loads(out))
+        code, out, err = _run_cli(["collect", "--config", SOURCES, "--anonymous"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual((len(payload["plan"]), payload["skipped_code_queries"]), (9, 1))
+        self.assertNotIn("/search/code", [p["path"] for p in payload["plan"]])
 
     def test_only_the_game_queries_are_filtered_and_never_by_their_own_word(self):
         self.assertIsNone(self.terms["ps3recomp in:name fork:true"])
         self.assertIsNone(self.terms["ps3recomp in:description fork:true"])
+        # Repository search items carry no README text, so a readme query cannot be filtered.
+        self.assertIsNone(self.terms["ps3recomp in:readme fork:true"])
+        self.assertIsNone(self.terms["filename:ps3recomp-LICENSE.txt"])
         for query in ("killzone in:name", "killzone in:description"):
             self.assertNotIn("killzone", [t.casefold() for t in self.terms[query]])
         for query in ("helghast in:name", "helghast in:description"):
