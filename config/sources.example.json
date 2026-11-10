@@ -1,11 +1,19 @@
 {
-  "_comment": "Placeholders only. Every name here is fictional and the live collector refuses a config that still uses any of them. The real roots and queries are decided by the maintainers and are not committed.",
+  "_comment": "Placeholders only. Every name here is fictional and the live collector refuses a config that still uses any of them. The reviewed config for the scheduled job is config/sources.json.",
   "queries": [
-    "example-recomp-placeholder in:name"
+    "example-recomp-placeholder in:name",
+    {"q": "example-recomp-placeholder in:description", "require_any": ["example-cue-placeholder"]}
   ],
   "roots": [
     {"repository_id": 1, "full_name": "example-org/example-recomp-placeholder"}
   ],
+  "include": [
+    {"repository_id": 2, "full_name": "example-org/example-extra-placeholder"}
+  ],
+  "deny": {
+    "repositories": ["example-org/example-unrelated-placeholder"],
+    "owners": ["example-spam-placeholder"]
+  },
   "commit_window_days": 30,
   "max_requests": 500,
   "max_repositories": 500,

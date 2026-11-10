@@ -15,8 +15,16 @@ Order of work in `collect`:
 2. Roots: GET /repos/{owner}/{repo}/forks per configured root (per_page
    100, page cap). A capped or interrupted walk sets forks_scan_complete
    false and a resume_cursor "page=N".
-3. Candidates: the union of search ids, fork ids and root ids, ascending,
-   bounded by max_repositories. For each: GET /repositories/{id} (by id,
+   A query may carry `require_any` terms: a search item is then kept only
+   when its full_name or its description (from the search item itself, so
+   no extra request) contains one of the terms, case-insensitively as a
+   plain substring. Ids left out are counted in the search entry's
+   `filtered_out` and the report's `filtered_out`, and are not recorded.
+3. Candidates: the union of search ids, fork ids, root ids and the config's
+   `include` ids, minus the config's `deny` list (repositories or owners,
+   by the name the listing gave; counted in the report's `denied`, removed
+   from the run's listings; roots and included ids are never denied),
+   ascending, bounded by max_repositories. For each: GET /repositories/{id} (by id,
    so renames are followed), then GET .../commits?sha=<default branch>&
    since=<run_at minus the window>&per_page=100 (page cap; a cap sets
    commits_complete false; a 409, GitHub's answer for an empty
@@ -54,6 +62,7 @@ escapes it. URLs from responses (html_url and friends) are ignored.
 """
 
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from . import github, schema
@@ -75,15 +84,60 @@ EMPTY_REPOSITORY_STATUS = 409
 _SPACE_RE = re.compile(r"\s+")
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9_\-]+")
 
+MAX_TERMS = 50
+MAX_TERM = 64
+MAX_DENY_REPOSITORIES = 500
+MAX_DENY_OWNERS = 200
+MAX_INCLUDE = 200
+
+
+class Term(schema.Type):
+    """A require_any term: 1-64 characters, no control or format characters, no whitespace but
+    single inner spaces, no leading or trailing space. Matched as a plain case-insensitive substring."""
+
+    def check(self, value, path):
+        schema.Str(max_len=MAX_TERM).check(value, path)
+        if (
+            not value
+            or value != value.strip()
+            or "  " in value
+            or any(unicodedata.category(c)[0] in ("C", "Z") and c != " " for c in value)
+        ):
+            raise schema.SchemaError("%s: a term must be 1-%d printable characters, single inner spaces only" % (path, MAX_TERM))
+        return value
+
+
+FILTERED_QUERY = schema.Obj({"q": schema.QUERY, "require_any": schema.List(Term(), MAX_TERMS)})
+
+
+class QueryEntry(schema.Type):
+    """A search query: a plain string, or {"q": query, "require_any": [term, ...]}."""
+
+    def check(self, value, path):
+        if isinstance(value, str):
+            return schema.QUERY.check(value, path)
+        if isinstance(value, dict):
+            return FILTERED_QUERY.check(value, path)
+        raise schema.SchemaError("%s: expected a query string or a query object, got %s" % (path, schema._kind(value)))
+
+
 ROOT_CONFIG = schema.Obj({"repository_id": schema.PositiveId(), "full_name": schema.FULL_NAME})
 PAGE_CAPS = schema.Obj(
     {"search": schema.Int(1, 10), "forks": schema.Int(1, 100), "commits": schema.Int(1, 50)},
     optional=("search", "forks", "commits"),
 )
+DENY = schema.Obj(
+    {
+        "repositories": schema.List(schema.FULL_NAME, MAX_DENY_REPOSITORIES),
+        "owners": schema.List(schema.OWNER, MAX_DENY_OWNERS),
+    }
+)
 CONFIG = schema.Obj(
     {
-        "queries": schema.List(schema.QUERY, 50),
+        "queries": schema.List(QueryEntry(), 50),
         "roots": schema.List(ROOT_CONFIG, 200),
+        "include": schema.List(ROOT_CONFIG, MAX_INCLUDE),
+        "deny": DENY,
         "commit_window_days": schema.Int(1, 365),
         "max_requests": schema.Int(1, MAX_REQUESTS_LIMIT),
         "max_repositories": schema.Int(1, 5000),
@@ -91,7 +145,7 @@ CONFIG = schema.Obj(
         "page_caps": PAGE_CAPS,
         "_comment": schema.Str(max_len=1024),
     },
-    optional=("commit_window_days", "max_requests", "max_repositories", "readme_bytes", "page_caps", "_comment"),
+    optional=("include", "deny", "commit_window_days", "max_requests", "max_repositories", "readme_bytes", "page_caps", "_comment"),
 )
 
 CONFIG_FILE_ERROR = "config: file is not strict JSON (syntax error, duplicate key, fractional or non-finite number)"
@@ -124,25 +178,52 @@ def validate_config(config):
         raise schema.SchemaError("config: expected an object")
     _count_unknown(config, CONFIG.fields, "config")
     _count_unknown(config.get("page_caps"), PAGE_CAPS.fields, "config.page_caps")
-    roots = config.get("roots")
-    if isinstance(roots, list):
-        for i, root in enumerate(roots):
-            _count_unknown(root, ROOT_CONFIG.fields, "config.roots[%d]" % i)
+    _count_unknown(config.get("deny"), DENY.fields, "config.deny")
+    for key in ("roots", "include"):
+        entries = config.get(key)
+        if isinstance(entries, list):
+            for i, entry in enumerate(entries):
+                _count_unknown(entry, ROOT_CONFIG.fields, "config.%s[%d]" % (key, i))
+    queries = config.get("queries")
+    if isinstance(queries, list):
+        for i, query in enumerate(queries):
+            _count_unknown(query, FILTERED_QUERY.fields, "config.queries[%d]" % i)
     CONFIG.check(config, "config")
     if not config["queries"] and not config["roots"]:
         raise schema.SchemaError("config: at least one query or one root is required")
-    for i, query in enumerate(config["queries"]):
+    for i, entry in enumerate(config["queries"]):
+        query = query_text(entry)
         if "://" in query or schema._SCHEME_RE.match(query) is not None:
             raise schema.SchemaError("config.queries[%d]: a search query must not contain a URL" % i)
-    queries = [_normalise_name(q) for q in config["queries"]]
+        if isinstance(entry, dict):
+            terms = [t.casefold() for t in entry["require_any"]]
+            if not terms:
+                raise schema.SchemaError("config.queries[%d].require_any: at least one term is required" % i)
+            if len(set(terms)) != len(terms):
+                raise schema.SchemaError("config.queries[%d].require_any: duplicate term" % i)
+    queries = [_normalise_name(query_text(q)) for q in config["queries"]]
     if len(set(queries)) != len(queries):
         raise schema.SchemaError("config.queries: duplicate query")
-    names = [_normalise_name(r["full_name"]) for r in config["roots"]]
-    if len(set(names)) != len(names):
-        raise schema.SchemaError("config.roots: duplicate full_name")
-    ids = [r["repository_id"] for r in config["roots"]]
-    if len(set(ids)) != len(ids):
-        raise schema.SchemaError("config.roots: duplicate repository_id")
+    include = config.setdefault("include", [])
+    deny = config.setdefault("deny", {"repositories": [], "owners": []})
+    for key, entries in (("roots", config["roots"]), ("include", include)):
+        names = [_normalise_name(r["full_name"]) for r in entries]
+        if len(set(names)) != len(names):
+            raise schema.SchemaError("config.%s: duplicate full_name" % key)
+        ids = [r["repository_id"] for r in entries]
+        if len(set(ids)) != len(ids):
+            raise schema.SchemaError("config.%s: duplicate repository_id" % key)
+    root_ids = set(r["repository_id"] for r in config["roots"])
+    root_names = set(r["full_name"].lower() for r in config["roots"])
+    if any(r["repository_id"] in root_ids or r["full_name"].lower() in root_names for r in include):
+        raise schema.SchemaError("config.include: a root is already a candidate; do not include it")
+    for key in ("repositories", "owners"):
+        values = [v.lower() for v in deny[key]]
+        if len(set(values)) != len(values):
+            raise schema.SchemaError("config.deny.%s: duplicate entry" % key)
+    for key, entries in (("roots", config["roots"]), ("include", include)):
+        if any(is_denied(r["full_name"], deny) for r in entries):
+            raise schema.SchemaError("config.deny: names an entry of config.%s" % key)
     config.setdefault("commit_window_days", DEFAULT_COMMIT_WINDOW_DAYS)
     config.setdefault("max_requests", DEFAULT_MAX_REQUESTS)
     config.setdefault("max_repositories", DEFAULT_MAX_REPOSITORIES)
@@ -165,6 +246,40 @@ def _normalise_name(value):
     return _SPACE_RE.sub(" ", value.strip()).lower()
 
 
+def query_text(entry):
+    """The search string of a query entry (a plain string or a {"q", "require_any"} object)."""
+    return entry["q"] if isinstance(entry, dict) else entry
+
+
+def query_terms(entry):
+    """The require_any terms of a query entry, or None for a plain (unfiltered) query."""
+    return entry["require_any"] if isinstance(entry, dict) else None
+
+
+def is_relevant(full_name, description, terms):
+    """True when the name or the description contains one of `terms` (case-insensitive substring).
+
+    The name and the description are matched separately, so a term never
+    spans the two. The description is cut to the run format's bound first,
+    so the decision can be checked again against the stored description.
+    """
+    name = full_name.casefold()
+    text = description[: schema.MAX_DESCRIPTION].casefold() if isinstance(description, str) else ""
+    for term in terms:
+        term = term.casefold()
+        if term in name or term in text:
+            return True
+    return False
+
+
+def is_denied(full_name, deny):
+    """True when `full_name` or its owner is on the config's deny lists (case-insensitive)."""
+    name = full_name.lower()
+    if name in set(r.lower() for r in deny["repositories"]):
+        return True
+    return name.split("/")[0] in set(o.lower() for o in deny["owners"])
+
+
 def _tokens(value):
     """Lower-cased word tokens of a name or query; search qualifiers (words with ':') are not tokens."""
     tokens = set()
@@ -184,11 +299,15 @@ def example_placeholders(path=EXAMPLE_CONFIG_PATH):
     """
     example = validate_config(schema.read_json(path))
     tokens = set()
-    for root in example["roots"]:
+    for root in example["roots"] + example["include"]:
         tokens.update(_tokens(root["full_name"]))
     for query in example["queries"]:
-        tokens.update(_tokens(query))
-    ids = set(r["repository_id"] for r in example["roots"])
+        tokens.update(_tokens(query_text(query)))
+        for term in query_terms(query) or ():
+            tokens.update(_tokens(term))
+    for name in example["deny"]["repositories"] + example["deny"]["owners"]:
+        tokens.update(_tokens(name))
+    ids = set(r["repository_id"] for r in example["roots"] + example["include"])
     return tokens, ids
 
 
@@ -197,15 +316,23 @@ def example_names(path=EXAMPLE_CONFIG_PATH):
 
 
 def config_uses_example_names(config, path=EXAMPLE_CONFIG_PATH):
-    """Entries of `config` that use a placeholder: an example token in a query or root name, or an example root id."""
+    """Entries of `config` that use a placeholder: an example token in a query, a require_any term, a root,
+    include or deny name, or an example root or include id."""
     tokens, ids = example_placeholders(path)
     found = []
-    for root in config["roots"]:
+    for root in config["roots"] + config.get("include", []):
         if root["repository_id"] in ids or _tokens(root["full_name"]) & tokens:
             found.append(root["full_name"])
     for query in config["queries"]:
-        if _tokens(query) & tokens:
-            found.append(query)
+        words = _tokens(query_text(query))
+        for term in query_terms(query) or ():
+            words |= _tokens(term)
+        if words & tokens:
+            found.append(query_text(query))
+    deny = config.get("deny") or {"repositories": [], "owners": []}
+    for name in deny["repositories"] + deny["owners"]:
+        if _tokens(name) & tokens:
+            found.append(name)
     return found
 
 
@@ -213,10 +340,10 @@ def plan_requests(config):
     """The requests a run starts with; later ones depend on what these return."""
     plan = []
     for query in config["queries"]:
-        plan.append({"method": "GET", "path": "/search/repositories", "query": github.canonical_query({"q": query, "per_page": PER_PAGE, "page": 1})})
+        plan.append({"method": "GET", "path": "/search/repositories", "query": github.canonical_query({"q": query_text(query), "per_page": PER_PAGE, "page": 1})})
     for root in config["roots"]:
         plan.append({"method": "GET", "path": github.path_for_repo(root["full_name"], "/forks"), "query": github.canonical_query({"per_page": PER_PAGE, "page": 1})})
-    for root in config["roots"]:
+    for root in config["roots"] + config.get("include", []):
         plan.append({"method": "GET", "path": "/repositories/%d" % root["repository_id"], "query": ""})
     return plan
 
@@ -428,6 +555,8 @@ def collect(client, config, run_at):
         "dropped_items": 0,
         "not_fetched_repository_ids": [],
         "candidates_truncated": False,
+        "filtered_out": 0,
+        "denied": 0,
     }
     names = {}
     candidates = set()
@@ -458,17 +587,23 @@ def collect(client, config, run_at):
             return items[:cap], True
         return items, False
 
-    def listed_ids(items, path):
+    def listed_ids(items, path, terms=None):
+        """(ids kept, distinct ids listed). With `terms`, an item whose name and description
+        contain none of them is not kept (and its name is not recorded)."""
         ids = []
+        listed = set()
         for item in items:
             try:
                 rid, full_name = _listed_repository(item, path)
             except github.ResponseError:
                 report["dropped_items"] += 1
                 continue
+            listed.add(rid)
+            if terms is not None and not is_relevant(full_name, item.get("description"), terms):
+                continue
             ids.append(rid)
             names.setdefault(rid, full_name)
-        return ids
+        return ids, listed
 
     def after_pages(path, pages):
         """A run stop seen mid-walk ends the run; a search-bucket stop is noted; other interruptions are errors."""
@@ -480,9 +615,33 @@ def collect(client, config, run_at):
         if pages.stopped is not None:
             note_error(path, pages.stopped)
 
+    def apply_deny():
+        """Remove denied candidates (by the name the listing gave) before anything is fetched.
+
+        Roots and included repositories are never denied. A denied id is
+        also taken out of the search and fork listings in the run, so it is
+        not named anywhere and is not left pending.
+        """
+        denied = set(rid for rid in candidates if rid not in root_ids and rid not in include_ids and is_denied(names[rid], config["deny"]))
+        if denied:
+            candidates.difference_update(denied)
+            report["denied"] += len(denied)
+            for entry in run["searches"]:
+                entry["repository_ids"] = [i for i in entry["repository_ids"] if i not in denied]
+            for entry in run["roots"]:
+                entry["found_repository_ids"] = [i for i in entry["found_repository_ids"] if i not in denied]
+
+    include_ids = set()
+    for extra in config["include"]:
+        names.setdefault(extra["repository_id"], extra["full_name"])
+        include_ids.add(extra["repository_id"])
+
     try:
-        for query in config["queries"]:
+        for query_entry in config["queries"]:
+            query, terms = query_text(query_entry), query_terms(query_entry)
             entry = {"query": query, "complete": False, "repository_ids": []}
+            if terms is not None:
+                entry["filtered_out"] = 0
             run["searches"].append(entry)
             if report["search_stopped"]:
                 # The search bucket is exhausted: do not ask, record where to resume.
@@ -506,14 +665,18 @@ def collect(client, config, run_at):
                 continue
             before = report["dropped_items"]
             items, overflow = capped(pages.items, "search")
-            ids = listed_ids(items, "/search/repositories")
+            ids, listed = listed_ids(items, "/search/repositories", terms)
             entry["repository_ids"] = sorted(set(ids))[: schema.MAX_IDS]
+            if terms is not None:
+                entry["filtered_out"] = len(listed) - len(set(ids))
+                report["filtered_out"] += entry["filtered_out"]
             candidates.update(entry["repository_ids"])
             total = pages.extra.get("total_count")
             incomplete = pages.extra.get("incomplete_results")
             clean = report["dropped_items"] == before
             # total_count above the distinct ids listed covers the API's 1000-result ceiling too.
-            capped_total = isinstance(total, int) and not isinstance(total, bool) and total > len(entry["repository_ids"])
+            # Ids the filter left out were listed: they count here, so a filter never makes a search look cut short.
+            capped_total = isinstance(total, int) and not isinstance(total, bool) and total > len(listed)
             entry["complete"] = bool(pages.complete and clean and not overflow and incomplete is not True and not capped_total)
             if not pages.complete and pages.next_cursor is not None:
                 entry["resume_cursor"] = pages.next_cursor
@@ -535,7 +698,7 @@ def collect(client, config, run_at):
                 continue
             before = report["dropped_items"]
             items, overflow = capped(pages.items, "forks")
-            found = listed_ids(items, path)
+            found, _ = listed_ids(items, path)
             entry["found_repository_ids"] = list(dict.fromkeys(found))[: schema.MAX_IDS]
             entry["forks_scan_complete"] = bool(pages.complete and report["dropped_items"] == before and not overflow)
             if not entry["forks_scan_complete"] and pages.next_cursor is not None:
@@ -543,6 +706,8 @@ def collect(client, config, run_at):
             candidates.update(entry["found_repository_ids"])
             after_pages(path, pages)
 
+        apply_deny()
+        candidates.update(include_ids)
         ordered = sorted(candidates)
         if len(ordered) > config["max_repositories"]:
             report["candidates_truncated"] = True
@@ -615,8 +780,10 @@ def collect(client, config, run_at):
 
     if report["stopped"] is None and report["search_stopped"]:
         report["stopped"] = SEARCH_STOP
+    # A stop before the candidates were chosen: still keep denied ids out, and count included ones as not fetched.
+    apply_deny()
     listed = set(r["repository_id"] for r in run["repositories"])
-    unfetched = set(report["not_fetched_repository_ids"]) | ((set(candidates) | root_ids) - listed)
+    unfetched = set(report["not_fetched_repository_ids"]) | ((set(candidates) | root_ids | include_ids) - listed)
     report["not_fetched_repository_ids"] = sorted(unfetched)[: schema.MAX_IDS]
     run["repositories"].sort(key=lambda r: r["repository_id"])
     complete = (
@@ -635,6 +802,8 @@ def collect(client, config, run_at):
         "dropped_items": min(report["dropped_items"], schema.MAX_SAFE_INT),
         "not_fetched": len(report["not_fetched_repository_ids"]),
         "requests_made": client.requests_made,
+        "filtered_out": min(report["filtered_out"], schema.MAX_SAFE_INT),
+        "denied": report["denied"],
     }
     try:
         run = schema.validate_run(run)

@@ -496,8 +496,11 @@ SEARCH = Obj(
         "repository_ids": List(PositiveId(), MAX_IDS),
         # Position to resume an interrupted search from ("page=N").
         "resume_cursor": Nullable(Text(MAX_TAG)),
+        # A query with require_any terms: distinct listed ids its filter left out
+        # (they are not in repository_ids and were not fetched for this query).
+        "filtered_out": NonNegInt(),
     },
-    optional=("resume_cursor",),
+    optional=("resume_cursor", "filtered_out"),
 )
 REJECTED = Obj({"path": Str(pattern=PATH_RE, max_len=128), "reason": Enum(REJECTION_REASONS)})
 MAX_REJECTED = 100
@@ -520,7 +523,12 @@ RUN = Obj(
                 "dropped_items": NonNegInt(),
                 "not_fetched": NonNegInt(),
                 "requests_made": NonNegInt(),
-            }
+                # Distinct ids left out by query filters, and candidates removed by the
+                # config's deny list. Neither makes a run incomplete. Absent in older runs.
+                "filtered_out": NonNegInt(),
+                "denied": NonNegInt(),
+            },
+            optional=("filtered_out", "denied"),
         ),
     },
     optional=("fictional", "rejected_fields", "collection_report"),
