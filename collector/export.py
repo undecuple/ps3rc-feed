@@ -1,13 +1,22 @@
 """Site feed export: the observation store as the static page's feed.json and manifest.json.
 
 Run files go through the same path as the dry run (schema.validate_run,
-events.apply_run into a store.empty_state(), catalog.build_catalog); this
-module only reshapes the resulting state into the records site/app.js and
-site/terminal.js read:
+events.apply_run into a store.empty_state() or a state saved by an earlier
+export, catalog.build_catalog); this module only reshapes the resulting
+state into the records site/app.js and site/terminal.js read:
 
-- feed: {generated_at, repos[], events[]}. Every record has a string `id`
-  ("r<repository id>" for a repository, the canonical event id for an
-  event); an event's `repo_id` is the id of its repository record.
+- feed: {generated_at, collection, repos[], events[]}, plus
+  stale_after_minutes when the export is given one. Every record has a
+  string `id` ("r<repository id>" for a repository, the canonical event id
+  for an event); an event's `repo_id` is the id of its repository record.
+- collection describes the newest applied run, copied from the state's
+  collection.last_run: {complete, stopped, not_fetched, error_count,
+  last_run_at}. complete is false and stopped names the reason ("budget",
+  "rate_limited", ...) when that run did not finish; a run file without a
+  collection_report counts as complete with no errors (events.apply_run).
+- stale_after_minutes, when present, is how old generated_at may get before
+  the page calls the feed stale (site/app.js reads data.stale_after_minutes
+  and falls back to its own default when the key is absent).
 - Text fields are plain text. The store and the catalog hold HTML-escaped
   text (text.escape_text); the page inserts text with textContent, so the
   escaping is undone here with html.unescape, which is an exact inverse of
@@ -22,9 +31,10 @@ site/terminal.js read:
   number); repositories are capped at MAX_FEED_REPOS, always keeping those
   the kept events refer to.
 
-Deterministic: same run files, same bytes (sorted keys, fixed orderings);
-the export command refuses two run files with the same run_at, so the
-argument order does not matter.
+Deterministic: same state and run files, same bytes (sorted keys, fixed
+orderings); the export command refuses two run files with the same run_at,
+so the argument order does not matter, and a state saved after some runs
+then given the rest gives the same feed as all the runs from scratch.
 """
 
 import hashlib
@@ -94,10 +104,23 @@ def _newest_first(event):
     return (event["observed_at"], event["source_at"] or "", event["event_id"])
 
 
-def build_feed(state):
+def _collection_record(state):
+    last = state["collection"]["last_run"]
+    return {
+        "complete": last["complete"],
+        "stopped": last["stopped"],
+        "not_fetched": last["not_fetched"],
+        "error_count": last["error_count"],
+        "last_run_at": last["last_run_at"],
+    }
+
+
+def build_feed(state, stale_after_minutes=None):
     """The feed document for a state that has had at least one run applied."""
     if state["last_run_at"] is None:
         raise ValueError("no run has been applied")
+    if state["collection"]["last_run"]["last_run_at"] != state["last_run_at"]:
+        raise ValueError("collection.last_run does not describe the last applied run")
     events = sorted(state["events"], key=_newest_first, reverse=True)[:MAX_FEED_EVENTS]
     entries = catalog.build_catalog(state)
     referenced = set(e["repository_id"] for e in events)
@@ -105,11 +128,15 @@ def build_feed(state):
     room = MAX_FEED_REPOS - len(keep)
     keep += [e for e in entries if e["id"] not in referenced][: max(room, 0)]
     keep.sort(key=lambda e: e["id"])
-    return {
+    feed = {
         "generated_at": state["last_run_at"],
+        "collection": _collection_record(state),
         "repos": [_repo_record(e) for e in keep],
         "events": [_event_record(e) for e in events],
     }
+    if stale_after_minutes is not None:
+        feed["stale_after_minutes"] = stale_after_minutes
+    return feed
 
 
 def build_manifest(feed, feed_bytes):
