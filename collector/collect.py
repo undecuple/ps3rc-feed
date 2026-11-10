@@ -41,7 +41,7 @@ Order of work in `collect`:
    `include` ids, minus the config's `deny` list (repositories or owners,
    by the name the listing gave; counted in the report's `denied`, removed
    from the run's listings; roots and included ids are never denied),
-   ascending, bounded by max_repositories. For each: GET /repositories/{id} (by id,
+   in fetch order (see fetch_order), bounded by max_repositories. For each: GET /repositories/{id} (by id,
    so renames are followed), then GET .../commits?sha=<default branch>&
    since=<run_at minus the window>&per_page=100 (page cap; a cap sets
    commits_complete false; a 409, GitHub's answer for an empty
@@ -381,6 +381,43 @@ def config_uses_example_names(config, path=EXAMPLE_CONFIG_PATH):
     return found
 
 
+FETCH_ORDER = ("roots_and_include_by_id", "new_newest_id_first", "known_oldest_attempt_first")
+
+
+def fetch_order(candidates, priority_ids, last_attempted=None):
+    """The order candidates are fetched in; max_repositories cuts this list.
+
+    1. Roots and `include` entries (`priority_ids`), ascending id: the config
+       names them, so they always come first.
+    2. Candidates never attempted before (absent from `last_attempted`),
+       newest (highest) id first, so a new repository is never the one cut.
+    3. Known candidates, oldest last attempt first, ties by ascending id: a
+       repository left out of one run is among the first of the next, so the
+       cut rotates and every candidate is reached within a few runs.
+
+    `last_attempted` maps repository id to the timestamp of its last
+    attempted refresh (`last_attempted_from_state`); None means no previous
+    state, so every candidate is new and the order is newest id first.
+    The order depends only on the arguments: no clock, no hash order.
+    """
+    known = last_attempted or {}
+    first = sorted(rid for rid in candidates if rid in priority_ids)
+    rest = [rid for rid in candidates if rid not in priority_ids]
+    new = sorted((rid for rid in rest if rid not in known), reverse=True)
+    old = sorted((rid for rid in rest if rid in known), key=lambda rid: (known[rid], rid))
+    return first + new + old
+
+
+def last_attempted_from_state(state):
+    """{repository id: last_attempted_refresh_at} of a validated store state (store.load_state).
+
+    Every observation in the store comes from a run that listed the
+    repository (fetched, failed or rate limited), so this is the set of
+    repositories attempted before and when each was last attempted.
+    """
+    return {int(key): obs["last_attempted_refresh_at"] for key, obs in state["repositories"].items()}
+
+
 def plan_requests(config, authenticated=True):
     """The requests a run starts with; later ones depend on what these return.
 
@@ -597,8 +634,13 @@ def _failure_kind(exc):
     return "response"
 
 
-def collect(client, config, run_at):
-    """Return (run, report). The run passes schema.validate_run; the report says what did not happen."""
+def collect(client, config, run_at, last_attempted=None):
+    """Return (run, report). The run passes schema.validate_run; the report says what did not happen.
+
+    `last_attempted` ({repository id: timestamp}, see last_attempted_from_state)
+    sets the fetch order of the candidates (fetch_order); None orders them
+    newest id first after the roots and included repositories.
+    """
     config = validate_config(dict(config))
     schema.TIMESTAMP.check(run_at, "run_at")
     caps = config["page_caps"]
@@ -817,7 +859,7 @@ def collect(client, config, run_at):
         candidates.update(rid for rid in unnamed if rid in names)
         apply_deny()
         candidates.update(include_ids)
-        ordered = sorted(candidates)
+        ordered = fetch_order(candidates, root_ids | include_ids, last_attempted)
         if len(ordered) > config["max_repositories"]:
             report["candidates_truncated"] = True
             report["not_fetched_repository_ids"].extend(ordered[config["max_repositories"] :])

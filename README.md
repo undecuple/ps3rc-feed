@@ -47,6 +47,10 @@ Not built yet: RSS and Discord feeds.
     GITHUB_TOKEN=... python3 -B -m collector collect --config <your config> --live \
         --max-requests 300 --out data/run.json
 
+    # the same, with the fetch order taken from the state the export keeps (see "Fetch order")
+    GITHUB_TOKEN=... python3 -B -m collector.cli collect --config <your config> --live \
+        --max-requests 300 --out data/run-003.json --previous-state data/state.json
+
     # site feed from run files, no network
     python3 -B -m collector export --runs data/run-001.json --out-dir data/site
 
@@ -102,8 +106,31 @@ never values from the file.
   name the listing gave, before anything is fetched. Denied ids are left out of the run's listings and counted in
   `collection_report.denied`. Roots and included repositories cannot be denied (the config is refused).
 - `max_requests`, `max_repositories`, `commit_window_days`, `readme_bytes`, `page_caps` (`search`, `code` (1 to 3,
-  default 1), `forks`, `commits` pages per listing): the budget. A repository costs about four requests; candidates are fetched in
-  ascending id order and those past `max_repositories` are reported as not fetched.
+  default 1), `forks`, `commits` pages per listing): the budget. A repository costs about four requests; candidates are
+  fetched in the fetch order below and those past `max_repositories` are reported as not fetched.
+
+### Fetch order
+
+When there are more candidates than `max_repositories` (or the budget stops the run), the order decides which are
+left out. It is deterministic and needs no network:
+
+1. Roots and `include` entries, ascending id. The config names them, so they always come first.
+2. Candidates never attempted before, newest (highest) id first, so a newly found repository is fetched first.
+3. Candidates attempted before, oldest last attempt first, ties by ascending id. A repository left out of one run
+   is among the first of the next, so the cut rotates.
+
+"Attempted before, and when" comes from `--previous-state <state .json under data/>`: the state `export --state-out`
+keeps. Only its repositories' `last_attempted_refresh_at` values are read, and the file is never written. It follows
+the `--state-in` path rules; a missing or unusable file is refused before any request (exit 2, or 1 for a file that
+is not a valid state), and `--out` may not name it. Without the flag every candidate counts as new, so the order is
+roots and `include`, then newest id first, and the same repositories are left out every run. The request plan, the
+`--recorded` plan and the live summary carry `previous_state` (`known_repositories`, `last_run_at`) when the flag
+is given. A daily job runs `collect --previous-state data/state.json`, then `export --state-in data/state.json
+--state-out data/state.json --overwrite` with the new run.
+
+A repository left out is simply absent from the run: the run is partial (`complete` false, `not_fetched` counts
+it), the export keeps its previous values, and it is listed as not refreshed, not as failing. When more new
+repositories turn up every run than there are free places, the lowest new ids wait until fewer new ones arrive.
 
 ### Reviewing a change to `config/sources.json`
 
@@ -114,6 +141,9 @@ never values from the file.
    allows 1000 requests an hour, search 30 a minute, code search 10 a minute), and repository searches x
    `page_caps.search` + code searches x `page_caps.code` + roots x `page_caps.forks` + 4 x `max_repositories` fits in
    `max_requests`. For the committed config: 7 x 3 + 1 x 1 + 1 x 10 = 32, plus 4 x 190 = 760, is 792 of 800.
+   The fetch order changes which candidates are fetched, not how many, and `--previous-state` costs no request.
+   With 190 places, two runs reach every candidate while there are at most 380 (fewer by the roots and `include`
+   entries, which take a place in every run).
 3. For a new or changed `require_any`, list which repositories of a recent run file the terms keep and which they
    drop, and say why for every borderline case. Terms describe the game; repository names are not terms.
 4. Update the expectations in `tests/test_sources_config.py` in the same change, and run the tests.

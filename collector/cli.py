@@ -3,6 +3,7 @@
   dry-run <fixture paths...>        apply run files under tests/fixtures; print events, catalog, status; write nothing
   collect --config PATH             print the request plan; with --recorded FIXTURE drive the collector offline
   collect --config PATH --live ...  read-only GET requests to api.github.com; writes one run file under data/
+                                    (--previous-state sets the fetch order from a state saved by export)
   export --runs FILE... --out-dir D apply run files under data/; write the site's feed.json and manifest.json to D
                                     (--state-in / --state-out carry the store from one export to the next)
 
@@ -169,6 +170,11 @@ def build_parser():
     )
     col.add_argument("--out", help="with --live: run file to write, a .json under the data/ directory")
     col.add_argument("--overwrite", action="store_true", help="with --live: replace an existing --out file")
+    col.add_argument(
+        "--previous-state",
+        help="state saved by export --state-out (.json under data/): candidates never attempted come first (newest id first), "
+        "then known ones by oldest last attempt; without it, newest id first. Roots and include entries always come first",
+    )
     exp = sub.add_parser("export", help="apply run files under data/ and write the site feed (feed.json, manifest.json); no network")
     exp.add_argument("--runs", nargs="+", required=True, help="run files (.json) under data/; applied in run_at order")
     exp.add_argument("--out-dir", required=True, help="directory under data/ that receives feed.json and manifest.json")
@@ -394,12 +400,12 @@ def resolve_export_targets(out_dir, overwrite=False):
     return targets
 
 
-def resolve_state_input(value):
-    """--state-in: a regular .json file under data/, with the same path rules as --runs."""
-    _check_path_text(value, "--state-in")
+def resolve_state_input(value, flag="--state-in"):
+    """--state-in (or collect's --previous-state): a regular .json file under data/, with the same path rules as --runs."""
+    _check_path_text(value, flag)
     real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory")
     if not (stat.S_ISREG(os.lstat(real).st_mode) and real.endswith(".json")):
-        raise RefusedInput("refused: --state-in takes a .json state file under the data/ directory")
+        raise RefusedInput("refused: %s takes a .json state file under the data/ directory" % flag)
     return real
 
 
@@ -419,14 +425,14 @@ def _check_stale_minutes(value):
     return value
 
 
-def load_export_state(path):
-    """store.load_state for --state-in, with the path in the message relative to the repository (exit 1 on failure)."""
+def load_export_state(path, flag="--state-in"):
+    """store.load_state for --state-in (or --previous-state), with the path in the message relative to the repository (exit 1 on failure)."""
     rel = os.path.relpath(path, REPO_ROOT)
     try:
         return store.load_state(path)
     except schema.SchemaError as exc:
         detail = str(exc).replace(path + ": ", "").replace(path, rel)
-        raise schema.SchemaError("--state-in %s is not a usable state: %s" % (rel, detail)) from None
+        raise schema.SchemaError("%s %s is not a usable state: %s" % (flag, rel, detail)) from None
 
 
 def run_export(args):
@@ -541,6 +547,16 @@ def run_collect(args):
     skipped "no_token". Refusing instead would block every anonymous run of
     the reviewed config, while skipping sends nothing GitHub would refuse and
     keeps the gap visible in the run file.
+
+    --previous-state names the state the export keeps (export --state-out).
+    Only its repositories' last_attempted_refresh_at values are used, to put
+    the candidates in fetch order (collect.fetch_order): never attempted
+    first, newest id first, then the oldest attempt first, so the cut made by
+    max_repositories rotates instead of always leaving out the same ids. The
+    state is read, never written; it must be a valid state under data/ (a
+    missing or unusable file is refused, exit 2 or 1, before any request),
+    and --out must not name it. Without the flag every candidate counts as
+    never attempted.
     """
     config = collect.load_config(args.config)
     run_at = args.run_at or _now_utc()
@@ -549,6 +565,16 @@ def run_collect(args):
         _check_max_requests(args.max_requests)
     if args.live and args.recorded:
         raise RefusedInput("refused: --live and --recorded cannot be combined")
+    previous_path = resolve_state_input(args.previous_state, flag="--previous-state") if args.previous_state is not None else None
+    if previous_path is not None and args.live and args.out:
+        if os.path.realpath(resolve_out_path(args.out, overwrite=True)) == previous_path:
+            raise RefusedInput("refused: --out would replace the --previous-state file")
+    last_attempted = None
+    previous_summary = None
+    if previous_path is not None:
+        previous = load_export_state(previous_path, flag="--previous-state")
+        last_attempted = collect.last_attempted_from_state(previous)
+        previous_summary = {"known_repositories": len(last_attempted), "last_run_at": previous["last_run_at"]}
 
     if not args.live:
         if args.out:
@@ -559,14 +585,16 @@ def run_collect(args):
                 raise RefusedInput("refused: --recorded must name a regular file under tests/fixtures")
             transport = github.RecordedTransport.from_file(recorded_path)
             client = github.Client(transport, max_requests=config["max_requests"], page_caps=config["page_caps"])
-            collect.collect(client, config, run_at)
-            _print({"plan": client.log})
+            collect.collect(client, config, run_at, last_attempted)
+            payload = {"plan": client.log}
         else:
             payload = {"plan": collect.plan_requests(config, authenticated=not args.anonymous)}
             skipped = _code_queries(config) if args.anonymous else 0
             if skipped:
                 payload["skipped_code_queries"] = skipped
-            _print(payload)
+        if previous_summary is not None:
+            payload["previous_state"] = previous_summary
+        _print(payload)
         return EXIT_OK
 
     sys.stderr.write("LIVE: read-only GET requests to https://api.github.com will be made.\n")
@@ -592,24 +620,25 @@ def run_collect(args):
         sys.stderr.write("note: %d code search queries are skipped without a token; the run will be incomplete.\n" % _code_queries(config))
     transport = github.LiveTransport()
     client = github.Client(transport, token=token, max_requests=max_requests, page_caps=config["page_caps"])
-    run, report = collect.collect(client, config, run_at)
+    run, report = collect.collect(client, config, run_at, last_attempted)
     write_run_file(run, out_path, overwrite=args.overwrite)
-    _print(
-        {
-            "written": os.path.relpath(out_path, REPO_ROOT),
-            "run_at": run_at,
-            "repositories": len(run["repositories"]),
-            "complete": report["complete"],
-            "stopped": report["stopped"],
-            "effective_max_requests": max_requests,
-            "not_fetched_repository_ids": report["not_fetched_repository_ids"][:100],
-            "error_count": report["error_count"],
-            "errors": report["errors"],
-            "dropped_items": report["dropped_items"],
-            "skipped_searches": report["skipped_searches"],
-            "client": report["client"],
-        }
-    )
+    summary = {
+        "written": os.path.relpath(out_path, REPO_ROOT),
+        "run_at": run_at,
+        "repositories": len(run["repositories"]),
+        "complete": report["complete"],
+        "stopped": report["stopped"],
+        "effective_max_requests": max_requests,
+        "not_fetched_repository_ids": report["not_fetched_repository_ids"][:100],
+        "error_count": report["error_count"],
+        "errors": report["errors"],
+        "dropped_items": report["dropped_items"],
+        "skipped_searches": report["skipped_searches"],
+        "client": report["client"],
+    }
+    if previous_summary is not None:
+        summary["previous_state"] = previous_summary
+    _print(summary)
     return EXIT_OK if report["complete"] else EXIT_PARTIAL
 
 
