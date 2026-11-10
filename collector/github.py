@@ -30,9 +30,16 @@ parsed
 remaining of 0 exhausts that bucket, and a request against an exhausted
 bucket raises RateLimited naming it before any transport call. A 403 or
 429 carrying retry-after, or a 429 while the bucket still has requests
-left, is a secondary limit and stops everything. The client never sleeps and never forgets a
-recorded limit within a run. Header values that are not bounded integers
-are ignored (unknown); duplicate headers keep the most restrictive value.
+left, is a secondary limit and stops everything, with one exception: on
+GET /search/code (whose bucket is not at 0) it ends code search only. The
+client then waits retry-after seconds through its injectable `sleep` when
+that is at most MAX_CODE_SEARCH_WAIT, and asks the same URL once more (a
+second request against the budget, logged like any other); a missing or
+larger retry-after, or a second secondary limit, raises CodeSearchLimited
+and every later code search request is refused before the transport. No
+other path ever waits, and the client never forgets a recorded limit
+within a run. Header values that are not bounded integers are ignored
+(unknown); duplicate headers keep the most restrictive value.
 
 Responses: body capped (MAX_BODY), headers capped (MAX_HEADER_BYTES),
 strict JSON (no duplicate keys, no NaN/Infinity), shape checked against
@@ -79,6 +86,8 @@ SEARCH = "search"
 # GET /search/code draws from its own bucket (about 10 requests a minute, token required).
 CODE_SEARCH = "code_search"
 CODE_SEARCH_PATH = "/search/code"
+# Longest retry-after (seconds) the client waits for before asking a code search once more.
+MAX_CODE_SEARCH_WAIT = 10
 
 MAX_TOKEN_LENGTH = 4096
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]{1,%d}\Z" % MAX_TOKEN_LENGTH)
@@ -121,6 +130,20 @@ class RateLimited(GitHubError):
     def __init__(self, message, resource=CORE):
         GitHubError.__init__(self, message)
         self.resource = resource
+
+
+class CodeSearchLimited(RateLimited):
+    """A secondary limit on GET /search/code: code search ends, nothing else does.
+
+    `retry_after` is the parsed header (None when absent or unusable);
+    `answered` is False when the client refused before the transport because
+    code search was already limited in this run.
+    """
+
+    def __init__(self, message, retry_after=None, answered=True):
+        RateLimited.__init__(self, message, CODE_SEARCH)
+        self.retry_after = retry_after
+        self.answered = answered
 
 
 class BudgetExhausted(GitHubError):
@@ -226,7 +249,7 @@ class Pages:
 
     complete is False when the cap or a stop ended the walk; `stopped` says
     why ("rate_limited", "search_rate_limited", "code_search_rate_limited",
-    "budget", "network",
+    "code_search_secondary_limited", "budget", "network",
     "transport", "response", "status" or None); `status` is the first
     page's HTTP status (None when the first page produced no usable
     response).
@@ -622,7 +645,7 @@ class LiveTransport:
 
 
 class Client:
-    def __init__(self, transport, token=None, max_requests=100, page_caps=None, timeout=DEFAULT_TIMEOUT, max_body=MAX_BODY):
+    def __init__(self, transport, token=None, max_requests=100, page_caps=None, timeout=DEFAULT_TIMEOUT, max_body=MAX_BODY, sleep=None):
         if token is not None and not isinstance(token, Secret):
             raise TypeError("token must be a Secret")
         if not isinstance(max_requests, int) or isinstance(max_requests, bool) or max_requests < 1:
@@ -644,6 +667,10 @@ class Client:
         self.consecutive_failures = 0
         self.transport_failures = 0
         self.network_failed = False
+        # Code search secondary limits: the client is waiting-capable only here (tests pass a fake sleep).
+        self._sleep = time.sleep if sleep is None else sleep
+        self.code_search_limited = False
+        self.code_search_retries = 0
 
     @property
     def rate_limited(self):
@@ -677,6 +704,8 @@ class Client:
             "retry_after": self.retry_after,
             "transport_failures": self.transport_failures,
             "network_failed": self.network_failed,
+            "code_search_limited": self.code_search_limited,
+            "code_search_retries": self.code_search_retries,
             "authenticated": self.token is not None,
         }
 
@@ -686,7 +715,30 @@ class Client:
     # -- requests --
 
     def request(self, method, url, accept=ACCEPT_JSON):
-        """GET an allowed URL. Returns Response; raises before the transport on any refusal or stop."""
+        """GET an allowed URL. Returns Response; raises before the transport on any refusal or stop.
+
+        A code search secondary limit with retry-after at most
+        MAX_CODE_SEARCH_WAIT is waited out once and the URL asked again; see
+        the module docstring.
+        """
+        try:
+            return self._request_once(method, url, accept)
+        except CodeSearchLimited as exc:
+            if not exc.answered or exc.retry_after is None or exc.retry_after > MAX_CODE_SEARCH_WAIT:
+                self.code_search_limited = True
+                raise
+            wait = exc.retry_after
+        if self.requests_made < self.max_requests:
+            # No wait when the retry cannot be asked: _request_once then raises BudgetExhausted.
+            self._sleep(min(wait, MAX_CODE_SEARCH_WAIT))
+            self.code_search_retries += 1
+        try:
+            return self._request_once(method, url, accept)
+        except CodeSearchLimited:
+            self.code_search_limited = True
+            raise
+
+    def _request_once(self, method, url, accept):
         if method != "GET":
             raise TransportRefused("refused: only GET is allowed")
         path, query = check_url(url)
@@ -695,6 +747,8 @@ class Client:
             raise RateLimited("rate limit reached; not requesting %s" % path, CORE)
         if resource in self.exhausted:
             raise RateLimited("%s rate limit reached; not requesting %s" % (resource, path), resource)
+        if resource == CODE_SEARCH and self.code_search_limited:
+            raise CodeSearchLimited("code search secondary limit already met; not requesting %s" % path, answered=False)
         if self.network_failed:
             raise NetworkFailed("%d consecutive transport failures; not requesting %s" % (self.consecutive_failures, path))
         if self.requests_made >= self.max_requests:
@@ -760,7 +814,11 @@ class Client:
                 self.rate_limit_reset = reset
         if retry_after is not None:
             self.retry_after = retry_after
-        if (response.status in (403, 429) and retry_after is not None) or (response.status == 429 and remaining != 0):
+        secondary = (response.status in (403, 429) and retry_after is not None) or (response.status == 429 and remaining != 0)
+        if secondary and path == CODE_SEARCH_PATH and remaining != 0:
+            # Code search alone: the caller may wait and retry once; the run goes on either way.
+            raise CodeSearchLimited("code search secondary rate limit at %s (status %d)" % (path, response.status), retry_after)
+        if secondary:
             # A secondary limit (retry-after, or a 429 while the bucket still has requests left): everything stops.
             self.secondary_limited = True
             raise RateLimited("secondary rate limit at %s (status %d)" % (path, response.status), CORE)
@@ -860,7 +918,13 @@ class Client:
             url = next_url
 
 
+# Pages.stopped for a code search ended by a secondary limit; never a run stop.
+CODE_SEARCH_SECONDARY = "code_search_secondary_limited"
+
+
 def _stop_reason(exc):
+    if isinstance(exc, CodeSearchLimited):
+        return CODE_SEARCH_SECONDARY
     if isinstance(exc, RateLimited):
         if exc.resource == SEARCH:
             return "search_rate_limited"

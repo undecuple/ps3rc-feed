@@ -634,6 +634,7 @@ def run_collect(args):
         "errors": report["errors"],
         "dropped_items": report["dropped_items"],
         "skipped_searches": report["skipped_searches"],
+        "code_search_limited": report["code_search_limited"],
         "client": report["client"],
     }
     if previous_summary is not None:

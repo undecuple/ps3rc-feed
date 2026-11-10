@@ -107,6 +107,10 @@ never values from the file.
   left out of the plan (it says how many in `skipped_code_queries`) and not asked, and the run is incomplete (the
   search entry says `"skipped": "no_token"`, the report counts `skipped_searches`). Code search has its own rate limit
   (about 10 requests a minute), separate from the search limit, so either running out leaves the other kind going.
+  A secondary limit on code search (a 403 or 429 with `retry-after`, or a 429 while requests are left) ends code
+  search only: the collector waits `retry-after` seconds when that is at most 10 and asks once more (that request
+  counts in the budget), and otherwise, or when the limit comes again, marks the code searches incomplete and goes on
+  with the repository searches and fetches. A secondary limit anywhere else still stops the run.
   Repository search items carry no README text: a query with `in:readme` cannot use `require_any` and stays a plain
   string.
 - `roots`: `{"repository_id", "full_name"}` repositories whose fork network is walked.
@@ -180,16 +184,27 @@ When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand fr
 
 1. Collects with `--max-requests 800`, plus one request that checks code search and prints only the status.
 2. Exports on top of the state saved by the previous run.
-3. Saves `state.json`, `feed.json` and `manifest.json` on the `feed-state` branch. Each run replaces the branch with
-   one commit. Run files are never committed.
-4. Runs the site tests and deploys the page with the new feed.
+3. Checks the run. An abnormal stop publishes nothing: when the run stopped for anything but the request budget
+   (`rate_limited`, `search_rate_limited`, `code_search_rate_limited`, `network`) or the feed lists no repositories,
+   the collect job prints the reason and fails, and nothing is pushed or deployed.
+4. Saves `state.json`, `feed.json` and `manifest.json` on the `feed-state` branch. Each run replaces the branch with
+   one commit. Run files are never committed. A feed with under half the repositories of the committed
+   `site/data/feed.json` is refused.
+5. Runs the site tests and deploys the page with the new feed, except after a first run.
 
 A run makes at most 801 requests, and four runs a day make at most 3,204. Scheduled runs start 6 hours apart and
 never overlap, so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
 by hand adds up to 801 more, and the collector stops when it reaches a rate limit.
 
+Not verified yet: the first live run on the Actions token met a code search secondary limit on its first code
+search request (429, `retry-after: 2`). The single wait and retry is meant for that, but the limit may recur on the
+Actions token; the next run shows. If it does, the code search entry is incomplete and the rest of the run is
+published.
+
 The first run finds no `feed-state` branch. It then starts from an empty state, so its feed is a baseline with no
-events. A push to `main` deploys the page with the feed from `feed-state` when that feed matches its manifest, and
+events. It pushes `feed-state` but does not deploy. After the first run, review `feed.json` on the `feed-state`
+branch, then deploy it by starting the `pages` workflow by hand (Actions tab, `pages`, Run workflow); that workflow
+serves the `feed-state` feed when it passes the same checks. A push to `main` deploys the page with the feed from `feed-state` when that feed matches its manifest, and
 with the committed `site/data/` otherwise.
 
 ## How AI was used
