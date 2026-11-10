@@ -16,7 +16,14 @@ Order of work in `collect`:
    (per_page 100, page cap `page_caps.code`, 1 by default, at most 3). It
    draws from GitHub's code_search bucket (about 10 a minute), handled
    like the search bucket but separately (code_search_rate_limited), so
-   either running out leaves the other kind of search running. Each item
+   either running out leaves the other kind of search running. A
+   secondary limit on code search (403/429 with retry-after, or a 429
+   while the bucket still has requests left) is waited out once when
+   retry-after is at most 10 seconds (github.Client); when it persists,
+   that code search is complete=false with a resume cursor, later code
+   queries are not asked (resume cursor "page=1"), the report counts them
+   in code_search_limited, and the repository searches, fork walks and
+   fetches go on with `stopped` left null. Each item
    is a file; its `repository` gives the id (no usable id: the item is
    dropped) and the name and description `require_any` is matched
    against. A repository listed for several files is one id, and an id
@@ -630,6 +637,8 @@ _RUN_STOPS = ("rate_limited", "budget", "network")
 SEARCH_STOP = "search_rate_limited"
 CODE_SEARCH_STOP = "code_search_rate_limited"
 SEARCH_STOPS = (SEARCH_STOP, CODE_SEARCH_STOP)
+# A code search secondary limit: ends code search for this run, nothing else.
+CODE_SECONDARY = github.CODE_SEARCH_SECONDARY
 # The bucket stop that ends the searches of a kind.
 KIND_STOPS = {"repositories": SEARCH_STOP, "code": CODE_SEARCH_STOP}
 
@@ -658,6 +667,8 @@ def collect(client, config, run_at, last_attempted=None):
         # Search bucket stops seen (search_rate_limited, code_search_rate_limited).
         "search_stops": set(),
         "skipped_searches": 0,
+        # Code searches cut short or not asked because of a code search secondary limit.
+        "code_search_limited": 0,
         "errors": [],
         "error_count": 0,
         "dropped_items": 0,
@@ -752,6 +763,9 @@ def collect(client, config, run_at, last_attempted=None):
 
     def after_pages(path, pages):
         """A run stop seen mid-walk ends the run; a search-bucket stop is noted; other interruptions are errors."""
+        if pages.stopped == CODE_SECONDARY and path == github.CODE_SEARCH_PATH:
+            report["code_search_limited"] += 1
+            return
         if pages.stopped in _RUN_STOPS:
             raise _Stop(pages.stopped, True)
         if pages.stopped in SEARCH_STOPS:
@@ -804,6 +818,12 @@ def collect(client, config, run_at, last_attempted=None):
             try:
                 pages, failed = attempt(path, client.paginate, path, {"q": query, "per_page": PER_PAGE}, caps[SEARCH_CAPS[kind]], "object", "items")
             except _Stop as stop:
+                if stop.reason == CODE_SECONDARY and kind == "code":
+                    # Waited and retried once in the client, or not retryable, or refused before the
+                    # transport because code search already met the limit: this search only is incomplete.
+                    report["code_search_limited"] += 1
+                    entry["resume_cursor"] = "page=1"
+                    continue
                 if stop.reason not in SEARCH_STOPS:
                     raise
                 report["search_stops"].add(stop.reason)
@@ -812,7 +832,7 @@ def collect(client, config, run_at, last_attempted=None):
             if failed or pages.items is None:
                 if not failed:
                     after_pages(path, pages)
-                    if pages.stopped in SEARCH_STOPS:
+                    if pages.stopped in SEARCH_STOPS + (CODE_SECONDARY,):
                         entry["resume_cursor"] = "page=1"
                     elif pages.stopped is None:
                         note_error(path, "status")
@@ -939,7 +959,7 @@ def collect(client, config, run_at, last_attempted=None):
                 note_error(dpath, "status")
     except _Stop as stop:
         # The search phase handles its own buckets; a search limit raised anywhere else ends the run.
-        report["stopped"] = "rate_limited" if stop.reason in SEARCH_STOPS else stop.reason
+        report["stopped"] = "rate_limited" if stop.reason in SEARCH_STOPS + (CODE_SECONDARY,) else stop.reason
 
     if report["stopped"] is None and report["search_stops"]:
         # Both buckets may have run out: the repository search bucket is named first.

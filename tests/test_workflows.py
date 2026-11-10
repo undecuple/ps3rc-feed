@@ -158,11 +158,43 @@ def check_push_targets(text):
     return problems
 
 
+def job_if(head):
+    """The job-level `if:` expression, or None."""
+    for line in head:
+        match = re.match(r"^    if: (.+)$", line)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def top_level_or(expression):
+    """True when `||` appears outside parentheses (it could bypass a leading conjunct)."""
+    depth = 0
+    for index, ch in enumerate(expression):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and expression.startswith("||", index):
+            return True
+    return False
+
+
+def gated(expression):
+    """The REFRESH_ENABLED gate is the whole condition, or its first conjunct joined by && only."""
+    gate = GATE[len("if: "):]
+    if expression == gate:
+        return True
+    if expression is None or not expression.startswith(gate + " && "):
+        return False
+    return not top_level_or(expression) and not re.search(r"\b(always|failure|cancelled|success)\(", expression)
+
+
 def check_jobs_gated(text, gate=True):
     problems = []
     for job, lines in jobs(text).items():
         head, _ = split_steps(lines)
-        if gate and ("    " + GATE) not in head:
+        if gate and not gated(job_if(head)):
             problems.append("job %s is not gated on REFRESH_ENABLED" % job)
         if not any(re.match(r"^    timeout-minutes: [1-9][0-9]*$", line) for line in head):
             problems.append("job %s has no timeout-minutes" % job)
@@ -210,6 +242,71 @@ def check_triggers(text):
     return problems
 
 
+PUBLISHABLE = "(needs.collect.outputs.stopped == '' || needs.collect.outputs.stopped == 'budget') && needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0'"
+COLLECT_OUTPUTS = [
+    "      stopped: ${{ steps.guard.outputs.stopped }}",
+    "      repos: ${{ steps.guard.outputs.repos }}",
+    "      first_run: ${{ steps.state.outputs.exists == 'false' }}",
+]
+GUARD_LINES = [
+    "        id: guard",
+    """          stopped=$(python3 -B -c 'import json,sys; s=json.load(open(sys.argv[1]))["collection_report"]["stopped"]; print("" if s is None else s)' data/run.json)""",
+    "            *[!A-Za-z_]*) echo \"stop reason is not a plain word\"; exit 1 ;;",
+    """          repos=$(python3 -B -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["repos"]))' data/site/feed.json)""",
+    "            *[!0-9]*|\"\") echo \"repository count is not a number\"; exit 1 ;;",
+    "          echo \"stopped=$stopped\" >> \"$GITHUB_OUTPUT\"",
+    "          echo \"repos=$repos\" >> \"$GITHUB_OUTPUT\"",
+    "          echo \"stop reason: ${stopped:-none}; repositories in the feed: $repos\"",
+    "            \"\"|budget) ;;",
+    "            *) echo \"the run stopped abnormally ($stopped): nothing is published or deployed\"; exit 1 ;;",
+    "          if [ \"$repos\" -eq 0 ]; then",
+]
+
+
+def check_publish_guard(text):
+    """The collect job exposes the stop reason, repository count and first-run flag, and fails on an abnormal run;
+    publish-state and deploy run only for a publishable run; deploy never runs after a first run."""
+    problems = []
+    all_jobs = jobs(text)
+    collect = all_jobs.get("collect", [])
+    for line in COLLECT_OUTPUTS:
+        if line not in collect:
+            problems.append("collect output missing: " + line.strip())
+    _, steps = split_steps(collect)
+    names = [step_name(step) for step in steps]
+    guard = [step for step in steps if step_name(step) == "Check the run before anything is published"]
+    if len(guard) != 1:
+        problems.append("collect has no single guard step")
+    else:
+        body = guard[0]
+        for line in GUARD_LINES:
+            if line not in body:
+                problems.append("guard step lacks: " + line.strip())
+        if any(line.strip().startswith(("if:", "continue-on-error")) for line in body):
+            problems.append("guard step is conditional or may fail silently")
+        # The reason is printed before any exit that refuses the run.
+        joined = "\n".join(body)
+        printed = joined.find("echo \"stop reason:")
+        refusal = joined.find("the run stopped abnormally")
+        if printed < 0 or refusal < 0 or printed > refusal:
+            problems.append("guard step does not print the reason before refusing")
+        uploads = [i for i, step in enumerate(steps) if "actions/upload-pages-artifact@" in "\n".join(step)]
+        if not uploads or steps.index(guard[0]) > min(uploads) or names.index("Export") > steps.index(guard[0]):
+            problems.append("guard step is not between Export and the artifact upload")
+    gate = GATE[len("if: "):]
+    expected = {
+        "publish-state": gate + " && " + PUBLISHABLE,
+        "deploy": gate + " && " + PUBLISHABLE + " && needs.collect.outputs.first_run == 'false'",
+    }
+    for job, condition in expected.items():
+        head, _ = split_steps(all_jobs.get(job, []))
+        if job_if(head) != condition:
+            problems.append("job %s condition is %r" % (job, job_if(head)))
+    if 'cp site/data/feed.json "$work/check/feed.json"' not in "\n".join(all_jobs.get("publish-state", [])):
+        problems.append("publish-state does not compare with the committed feed")
+    return problems
+
+
 def refresh_problems(text):
     return (
         check_pinned(text)
@@ -223,7 +320,26 @@ def refresh_problems(text):
         + check_schedule(text)
         + check_checkout_credentials(text)
         + check_triggers(text)
+        + check_publish_guard(text)
     )
+
+
+README_PHRASES = (
+    "An abnormal stop publishes nothing",
+    "After the first run, review `feed.json` on the `feed-state` branch",
+    "deploy it by starting the `pages` workflow by hand",
+    "may recur on the Actions token",
+)
+
+
+def readme_problems(readme):
+    """The Scheduled refresh section names the publishing guard, the manual first deploy and what is not verified."""
+    start = readme.find("\n## Scheduled refresh\n")
+    if start < 0:
+        return ["README has no Scheduled refresh section"]
+    end = readme.find("\n## ", start + 1)
+    section = readme[start : end if end >= 0 else len(readme)]
+    return ["Scheduled refresh does not say %r" % phrase for phrase in README_PHRASES if phrase not in " ".join(section.split())]
 
 
 class WorkflowFiles(unittest.TestCase):
@@ -273,6 +389,9 @@ class WorkflowFiles(unittest.TestCase):
         self.assertTrue("\n## Scheduled refresh\n" in readme, "README has no Scheduled refresh section")
         self.assertTrue("REFRESH_ENABLED" in readme, "README does not name REFRESH_ENABLED")
 
+    def test_readme_explains_the_publishing_guard(self):
+        self.assertEqual(readme_problems(read(os.path.join(REPO_ROOT, "README.md"))), [])
+
     def test_pages_overlays_the_state_branch(self):
         pages = read(os.path.join(WORKFLOWS, "pages.yml"))
         self.assertIn("ref: feed-state", pages)
@@ -298,7 +417,29 @@ MUTATIONS = [
     ("push extra ref", "HEAD:refs/heads/feed-state", "HEAD:refs/heads/feed-state main"),
     ("push in deploy", "          cd out\n", "          git push origin HEAD:refs/heads/feed-state\n          cd out\n"),
     ("contents write in collect", "    permissions:\n      contents: read\n    outputs:", "    permissions:\n      contents: write\n    outputs:"),
-    ("ungated job", "    needs: [collect, publish-state]\n    " + GATE + "\n", "    needs: [collect, publish-state]\n"),
+    ("ungated job", "    needs: collect\n    " + GATE + " && ", "    needs: collect\n    if: "),
+    ("gate bypassed by or", "    needs: collect\n    " + GATE + " && ", "    needs: collect\n    " + GATE + " || "),
+    ("deploy runs always", " && needs.collect.outputs.first_run == 'false'\n", " && needs.collect.outputs.first_run == 'false' && always()\n"),
+    ("deploy after a first run", " && needs.collect.outputs.first_run == 'false'\n", "\n"),
+    ("deploy on a first run only", "needs.collect.outputs.first_run == 'false'\n", "needs.collect.outputs.first_run != 'false'\n"),
+    ("publish-state skips first runs", "needs.collect.outputs.repos != '0'\n    runs-on", "needs.collect.outputs.repos != '0' && needs.collect.outputs.first_run == 'false'\n    runs-on"),
+    ("publish-state after rate_limited", "needs.collect.outputs.stopped == 'budget')", "needs.collect.outputs.stopped == 'budget' || needs.collect.outputs.stopped == 'rate_limited')"),
+    ("publish-state with no repos", "needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0'\n    runs-on", "needs.collect.outputs.repos != ''\n    runs-on"),
+    ("deploy with no repos", "needs.collect.outputs.repos != '0' && needs.collect.outputs.first_run", "needs.collect.outputs.first_run"),
+    ("no stopped output", "      stopped: ${{ steps.guard.outputs.stopped }}\n", ""),
+    ("no repos output", "      repos: ${{ steps.guard.outputs.repos }}\n", ""),
+    ("first_run inverted", "first_run: ${{ steps.state.outputs.exists == 'false' }}", "first_run: ${{ steps.state.outputs.exists == 'true' }}"),
+    ("guard allows rate_limited", '            ""|budget) ;;', '            ""|budget|rate_limited) ;;'),
+    ("guard does not fail", "nothing is published or deployed\"; exit 1 ;;", "nothing is published or deployed\" ;;"),
+    ("guard may fail silently", "        id: guard\n", "        id: guard\n        continue-on-error: true\n"),
+    ("guard unvalidated reason", '            *[!A-Za-z_]*) echo "stop reason is not a plain word"; exit 1 ;;\n', ""),
+    ("guard unvalidated count", '            *[!0-9]*|"") echo "repository count is not a number"; exit 1 ;;\n', ""),
+    ("guard ignores empty feed", '          if [ "$repos" -eq 0 ]; then', '          if [ "$repos" -lt 0 ]; then'),
+    ("guard reason unprinted", '          echo "stop reason: ${stopped:-none}; repositories in the feed: $repos"\n', ""),
+    ("guard after upload", "      - name: Check the run before anything is published\n",
+     "      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0\n        with:\n          path: data/artifact\n      - name: Check the run before anything is published\n"),
+    ("guard reads the wrong file", '["stopped"]; print("" if s is None else s)\' data/run.json', '["stopped"]; print("" if s is None else s)\' data/old.json'),
+    ("publish-state without size check", 'cp site/data/feed.json "$work/check/feed.json"', 'true'),
     ("no timeout", "    timeout-minutes: 10\n", ""),
     ("zero minute", '"17 */6 * * *"', '"0 */6 * * *"'),
     ("every hour", '"17 */6 * * *"', '"17 * * * *"'),
@@ -326,6 +467,26 @@ class BrokenWorkflows(unittest.TestCase):
                 self.assertNotEqual(refresh_problems(broken), [], mutation[0])
 
 
+def feed_bytes(count, stopped=None, collection=True, repos=None):
+    """A feed.json body with `count` repository records; `collection=False` leaves the collection object out."""
+    feed = {"generated_at": "2026-11-10T06:17:00Z", "repos": [{"id": "r%d" % (n + 1)} for n in range(count)] if repos is None else repos, "events": []}
+    if collection is True:
+        feed["collection"] = {"complete": stopped is None, "stopped": stopped, "not_fetched": 0, "error_count": 0, "last_run_at": "2026-11-10T06:17:00Z"}
+    elif collection is not False:
+        feed["collection"] = collection
+    return (json.dumps(feed, sort_keys=True) + "\n").encode("utf-8")
+
+
+class BrokenReadme(unittest.TestCase):
+    def test_each_phrase_is_required(self):
+        readme = read(os.path.join(REPO_ROOT, "README.md"))
+        for phrase in README_PHRASES:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, " ".join(readme.split()))
+                broken = " ".join(readme.split()).replace(phrase, "")
+                self.assertNotEqual(readme_problems(broken), [])
+
+
 def load_overlay():
     spec = importlib.util.spec_from_file_location("overlay_feed", OVERLAY)
     module = importlib.util.module_from_spec(spec)
@@ -342,12 +503,19 @@ class OverlayScript(unittest.TestCase):
         self.dest = os.path.join(self.tmp.name, "dest")
         os.mkdir(self.src)
         os.mkdir(self.dest)
-        for name in ("feed.json", "manifest.json"):
-            with open(os.path.join(self.dest, name), "w", encoding="utf-8") as handle:
-                handle.write("committed\n")
-        self.feed = b'{"generated_at": "2026-11-10T06:17:00Z", "repos": [], "events": []}\n'
-        self.version = hashlib.sha256(self.feed).hexdigest()[:16]
-        self.write_source(self.feed, {"feed": "feed.json", "generated_at": "2026-11-10T06:17:00Z", "version": self.version})
+        # The committed feed being replaced lists four repositories.
+        self.committed = feed_bytes(4, collection=False)
+        with open(os.path.join(self.dest, "feed.json"), "wb") as handle:
+            handle.write(self.committed)
+        with open(os.path.join(self.dest, "manifest.json"), "w", encoding="utf-8") as handle:
+            handle.write("committed\n")
+        self.feed = feed_bytes(3)
+        self.version = self.write_feed(self.feed)
+
+    def write_feed(self, feed):
+        version = hashlib.sha256(feed).hexdigest()[:16]
+        self.write_source(feed, {"feed": "feed.json", "generated_at": "2026-11-10T06:17:00Z", "version": version})
+        return version
 
     def write_source(self, feed, manifest):
         with open(os.path.join(self.src, "feed.json"), "wb") as handle:
@@ -381,7 +549,7 @@ class OverlayScript(unittest.TestCase):
     def test_unexpected_version_keeps_committed_data(self):
         code, _ = self.run_main("--required", "--expect-version", "0" * 16, self.src, self.dest)
         self.assertEqual(code, 1)
-        self.assertEqual(self.dest_feed(), b"committed\n")
+        self.assertEqual(self.dest_feed(), self.committed)
 
     def test_mismatches_keep_committed_data(self):
         cases = [
@@ -398,14 +566,14 @@ class OverlayScript(unittest.TestCase):
                 code, out = self.run_main(self.src, self.dest)
                 self.assertEqual(code, 0)
                 self.assertIn("kept the committed data", out)
-                self.assertEqual(self.dest_feed(), b"committed\n")
+                self.assertEqual(self.dest_feed(), self.committed)
                 self.assertEqual(self.run_main("--required", self.src, self.dest)[0], 1)
 
     def test_missing_source(self):
         missing = os.path.join(self.tmp.name, "absent")
         self.assertEqual(self.run_main(missing, self.dest)[0], 0)
         self.assertEqual(self.run_main("--required", missing, self.dest)[0], 1)
-        self.assertEqual(self.dest_feed(), b"committed\n")
+        self.assertEqual(self.dest_feed(), self.committed)
 
     def test_symlink_is_refused(self):
         os.remove(os.path.join(self.src, "feed.json"))
@@ -414,12 +582,70 @@ class OverlayScript(unittest.TestCase):
             handle.write(self.feed)
         os.symlink(target, os.path.join(self.src, "feed.json"))
         self.assertEqual(self.run_main("--required", self.src, self.dest)[0], 1)
-        self.assertEqual(self.dest_feed(), b"committed\n")
+        self.assertEqual(self.dest_feed(), self.committed)
 
     def test_committed_site_data_passes(self):
         site_data = os.path.join(REPO_ROOT, "site", "data")
         feed, manifest, version = self.overlay.check(site_data)
         self.assertEqual(len(version), 16)
+        # It has no collection object, and it may replace itself (same size).
+        self.assertNotIn("collection", json.loads(feed))
+        self.assertGreater(len(json.loads(feed)["repos"]), 0)
+        self.overlay.check_replaces(feed, site_data)
+
+    def assertRefused(self, feed, needle):
+        self.write_feed(feed)
+        code, out = self.run_main(self.src, self.dest)
+        self.assertEqual(code, 0)
+        self.assertIn("kept the committed data", out)
+        self.assertIn(needle, out)
+        self.assertEqual(self.dest_feed(), self.committed)
+        self.assertEqual(self.run_main("--required", self.src, self.dest)[0], 1)
+        self.assertEqual(self.dest_feed(), self.committed)
+
+    def assertAccepted(self, feed):
+        self.write_feed(feed)
+        self.assertEqual(self.run_main("--required", self.src, self.dest)[0], 0)
+        self.assertEqual(self.dest_feed(), feed)
+
+    def test_an_abnormal_stop_is_refused(self):
+        for stopped in ("rate_limited", "search_rate_limited", "code_search_rate_limited", "network", "", 0, False):
+            with self.subTest(stopped=stopped):
+                self.assertRefused(feed_bytes(4, stopped=stopped), "stopped abnormally")
+        self.assertRefused(feed_bytes(4, collection="text"), "collection is not an object")
+        for stopped in (None, "budget"):
+            with self.subTest(stopped=stopped):
+                self.assertAccepted(feed_bytes(4, stopped=stopped))
+
+    def test_a_missing_collection_is_not_a_refusal(self):
+        self.assertAccepted(feed_bytes(4, collection=False))
+
+    def test_an_empty_feed_is_refused(self):
+        self.assertRefused(feed_bytes(0), "no repositories")
+        self.assertRefused(feed_bytes(0, collection=False), "no repositories")
+        self.assertRefused(feed_bytes(3, repos="none"), "no repos list")
+        # Even with nothing to replace.
+        os.remove(os.path.join(self.dest, "feed.json"))
+        self.write_feed(feed_bytes(0))
+        self.assertEqual(self.run_main("--required", self.src, self.dest)[0], 1)
+
+    def test_a_feed_under_half_the_size_it_replaces_is_refused(self):
+        self.assertRefused(feed_bytes(1), "under half of the 4")
+        self.assertAccepted(feed_bytes(2))
+        # The destination now holds 2: 1 is half, so it is accepted.
+        self.assertAccepted(feed_bytes(1))
+
+    def test_nothing_to_replace_skips_the_size_rule(self):
+        os.remove(os.path.join(self.dest, "feed.json"))
+        self.assertAccepted(feed_bytes(1))
+
+    def test_an_unreadable_feed_to_replace_is_a_refusal(self):
+        for content in (b"committed\n", b"[]", b'{"repos": 3}'):
+            with self.subTest(content=content):
+                with open(os.path.join(self.dest, "feed.json"), "wb") as handle:
+                    handle.write(content)
+                self.committed = content
+                self.assertRefused(feed_bytes(4), "feed.json being replaced")
 
 
 if __name__ == "__main__":

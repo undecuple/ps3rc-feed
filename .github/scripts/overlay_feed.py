@@ -5,10 +5,14 @@ Usage: overlay_feed.py [--required] [--expect-version HEX] SOURCE_DIR DEST_DIR
 
 The files are copied only when both are regular files, both parse as JSON
 objects, the manifest names feed.json, its version is the first 16 hex digits
-of the SHA-256 of feed.json, and both carry the same generated_at. Otherwise
+of the SHA-256 of feed.json, both carry the same generated_at, and the feed
+is fit to be served: its repos list is not empty, its collection object
+(when it has one) says stopped null or "budget", and when DEST_DIR already
+holds a feed.json, the new repos list is at least half as long as that one
+(a feed.json in DEST_DIR that cannot be read is a refusal). Otherwise
 DEST_DIR is left as it is. Without --required that is exit 0 (keep the
 committed data); with --required it is exit 1. Nothing from the files is
-printed except the version.
+printed except the version and repository counts.
 """
 
 import hashlib
@@ -22,6 +26,8 @@ MANIFEST = "manifest.json"
 VERSION_HEX = 16
 MAX_BYTES = 16 * 1024 * 1024
 HEX = frozenset("0123456789abcdef")
+# Stop reasons of a run whose feed may replace the served one: none, or the normal budget stop.
+PUBLISHABLE_STOPS = (None, "budget")
 
 
 class Mismatch(Exception):
@@ -66,7 +72,35 @@ def check(source):
         raise Mismatch("feed.json hash does not match the manifest version")
     if not isinstance(feed.get("generated_at"), str) or manifest.get("generated_at") != feed.get("generated_at"):
         raise Mismatch("manifest and feed generated_at differ")
+    repos = _repo_count(feed, FEED)
+    if repos == 0:
+        raise Mismatch("feed.json lists no repositories")
+    # Feeds written before the collection object existed (the committed site data) have none: not a refusal.
+    if "collection" in feed:
+        collection = feed["collection"]
+        if not isinstance(collection, dict):
+            raise Mismatch("feed.json collection is not an object")
+        if collection.get("stopped") not in PUBLISHABLE_STOPS:
+            raise Mismatch("feed.json comes from a run that stopped abnormally")
     return feed_bytes, manifest_bytes, version
+
+
+def _repo_count(feed, name):
+    repos = feed.get("repos")
+    if not isinstance(repos, list):
+        raise Mismatch("%s has no repos list" % name)
+    return len(repos)
+
+
+def check_replaces(feed_bytes, dest):
+    """Raise Mismatch when DEST_DIR's feed.json lists more than twice the repositories of the new feed."""
+    target = os.path.join(dest, FEED)
+    if not os.path.lexists(target):
+        return
+    current = _repo_count(_load_object(_read_regular(target), "the feed.json being replaced"), "the feed.json being replaced")
+    new = _repo_count(_load_object(feed_bytes, FEED), FEED)
+    if new * 2 < current:
+        raise Mismatch("feed.json lists %d repositories, under half of the %d it would replace" % (new, current))
 
 
 def _replace(dest, name, data):
@@ -97,6 +131,7 @@ def main(argv):
             raise Mismatch("manifest version is not the expected one")
         if not os.path.isdir(dest) or os.path.islink(dest):
             raise Mismatch("destination is not a directory")
+        check_replaces(feed_bytes, dest)
     except Mismatch as exc:
         print("overlay: kept the committed data (%s)" % exc)
         return 1 if required else 0

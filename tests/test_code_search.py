@@ -8,6 +8,7 @@ and fictional; nothing opens a socket.
 
 import json
 import tempfile
+import time
 
 from helpers import CollectorTestCase, run_runs
 from test_github import RUN_AT, api_repo, make_client, ok, search_url
@@ -314,6 +315,179 @@ class RateLimitBuckets(CollectorTestCase):
         self.assertIs(run["searches"][0]["complete"], True)
         self.assertEqual(run["searches"][1]["resume_cursor"], "page=1")
         self.assertEqual(run["collection_report"]["stopped"], "code_search_rate_limited")
+
+
+# The answer the first live run on the Actions token got for its first code search.
+CODE_SECONDARY = {"status": 429, "headers": {"retry-after": "2", "x-ratelimit-resource": "code_search", "x-ratelimit-remaining": "10"}, "body": {"message": "slow down"}}
+
+
+def code_secondary(retry_after="2", status=429, remaining="10"):
+    headers = {"x-ratelimit-resource": "code_search", "x-ratelimit-remaining": remaining}
+    if retry_after is not None:
+        headers["retry-after"] = retry_after
+    return {"status": status, "headers": headers, "body": {"message": "slow down"}}
+
+
+class CodeSearchSecondaryLimit(CollectorTestCase):
+    """A secondary limit on /search/code: wait (fake sleep) and retry once, then give up on code search only."""
+
+    CONFIG = {"queries": ["first in:name", code_query(), "after in:name", code_query("filename:other.txt")], "roots": []}
+
+    def routes(self, code_answers):
+        routes = {code_url(LICENCE): code_answers}
+        routes.update(search("first in:name", [api_repo(12, "game-dev/port-b")]))
+        routes.update(search("after in:name", [api_repo(13, "game-dev/port-c")]))
+        routes.update(code_search("filename:other.txt", [code_item(14, "game-dev/port-d")]))
+        for rid, name in ((11, "game-dev/port-a"), (12, "game-dev/port-b"), (13, "game-dev/port-c"), (14, "game-dev/port-d")):
+            routes.update(fetch_routes(rid, name))
+        return routes
+
+    def collect(self, code_answers, config=None, **kw):
+        sleeps = []
+        run, report, client, paths = collect_code(config or self.CONFIG, self.routes(code_answers), sleep=sleeps.append, **kw)
+        return run, report, client, paths, sleeps
+
+    def assertCodeSearchGivenUp(self, run, report, client, paths):
+        self.assertEqual(run["searches"][1], {"query": LICENCE, "complete": False, "repository_ids": [], "kind": "code", "resume_cursor": "page=1"})
+        # The later code query is not asked; the repository search after it is.
+        self.assertEqual(run["searches"][3], {"query": "filename:other.txt", "complete": False, "repository_ids": [], "kind": "code", "resume_cursor": "page=1"})
+        self.assertEqual([s["complete"] for s in run["searches"]], [True, False, True, False])
+        self.assertEqual(paths.count("/search/repositories"), 2)
+        self.assertEqual([r["repository_id"] for r in run["repositories"]], [12, 13])
+        self.assertEqual([r["fetch_state"] for r in run["repositories"]], ["ok", "ok"])
+        cr = run["collection_report"]
+        self.assertIsNone(cr["stopped"])
+        self.assertIs(cr["complete"], False)
+        self.assertEqual(cr["error_count"], 0)
+        self.assertEqual(report["code_search_limited"], 2)
+        self.assertEqual(report["search_stops"], [])
+        self.assertIs(client.rate_limited, False)
+        self.assertIs(client.secondary_limited, False)
+        self.assertIs(client.code_search_limited, True)
+        self.assertIs(client.bucket_exhausted("code_search"), False)
+        state, _ = run_runs([run])
+        self.assertIn(LICENCE, state["collection"]["incomplete_searches"])
+
+    def test_the_retry_succeeds(self):
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, ok({"total_count": 1, "incomplete_results": False, "items": [code_item(11, "game-dev/port-a")]}, {"x-ratelimit-resource": "code_search"})])
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(run["searches"][1], {"query": LICENCE, "complete": True, "repository_ids": [11], "kind": "code"})
+        self.assertEqual(run["searches"][3]["repository_ids"], [14])
+        self.assertEqual([r["repository_id"] for r in run["repositories"]], [11, 12, 13, 14])
+        self.assertIsNone(run["collection_report"]["stopped"])
+        self.assertIs(run["collection_report"]["complete"], True)
+        self.assertEqual(report["code_search_limited"], 0)
+        self.assertEqual(client.code_search_retries, 1)
+        self.assertIs(client.code_search_limited, False)
+        # The request log shows both attempts, the same URL twice, then the next search.
+        code_query_string = code_url(LICENCE).split("?", 1)[1]
+        self.assertEqual(client.log[1:4], [
+            {"method": "GET", "path": "/search/code", "query": code_query_string},
+            {"method": "GET", "path": "/search/code", "query": code_query_string},
+            {"method": "GET", "path": "/search/repositories", "query": search_url("after in:name").split("?", 1)[1]},
+        ])
+        self.assertEqual(run["collection_report"]["requests_made"], 4 + 4 * 4 + 1)
+
+    def test_the_retry_fails(self):
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY])
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(paths[:4], ["/search/repositories", "/search/code", "/search/code", "/search/repositories"])
+        self.assertEqual(paths.count("/search/code"), 2)
+        self.assertEqual(client.code_search_retries, 1)
+        self.assertEqual(run["collection_report"]["requests_made"], 3 + 1 + 2 * 4)
+        self.assertCodeSearchGivenUp(run, report, client, paths)
+
+    def test_a_403_with_retry_after_is_retried_too(self):
+        run, report, client, paths, sleeps = self.collect([code_secondary(status=403), code_secondary(status=403)])
+        self.assertEqual(sleeps, [2])
+        self.assertCodeSearchGivenUp(run, report, client, paths)
+
+    def test_a_retry_after_over_10_seconds_is_not_waited_for(self):
+        run, report, client, paths, sleeps = self.collect([code_secondary("11"), CODE_SECONDARY])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(paths.count("/search/code"), 1)
+        self.assertEqual(client.code_search_retries, 0)
+        self.assertCodeSearchGivenUp(run, report, client, paths)
+        # 10 seconds is still waited for.
+        run, _, client, paths, sleeps = self.collect([code_secondary("10"), CODE_SECONDARY])
+        self.assertEqual((sleeps, paths.count("/search/code")), ([10], 2))
+
+    def test_a_429_without_retry_after_is_not_retried(self):
+        for garbled in (None, "soon"):
+            with self.subTest(retry_after=garbled):
+                run, report, client, paths, sleeps = self.collect([code_secondary(garbled), CODE_SECONDARY])
+                self.assertEqual(sleeps, [])
+                self.assertEqual(paths.count("/search/code"), 1)
+                self.assertCodeSearchGivenUp(run, report, client, paths)
+
+    def test_the_retry_counts_toward_the_budget(self):
+        # Budget 3: first search, the code search and its retry; the run then stops on the budget.
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY], max_requests=3)
+        self.assertEqual(paths, ["/search/repositories", "/search/code", "/search/code"])
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(run["collection_report"]["stopped"], "budget")
+        # Budget 2: the retry cannot be asked, so nothing is waited for.
+        run, report, client, paths, sleeps = self.collect([CODE_SECONDARY, CODE_SECONDARY], max_requests=2)
+        self.assertEqual(paths, ["/search/repositories", "/search/code"])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(run["collection_report"]["stopped"], "budget")
+
+    def test_a_limit_on_a_later_code_page_keeps_the_first_page(self):
+        link = '<https://api.github.com/search/code?page=2&per_page=100&q=filename%3Alicence-file.txt>; rel="next"'
+        first = ok({"total_count": 2, "incomplete_results": False, "items": [code_item(11, "game-dev/port-a")]}, {"link": link, "x-ratelimit-resource": "code_search"})
+        routes = {code_url(LICENCE): first, code_url(LICENCE, 2): [CODE_SECONDARY, CODE_SECONDARY]}
+        routes.update(search("after in:name", [api_repo(13, "game-dev/port-c")]))
+        for rid, name in ((11, "game-dev/port-a"), (13, "game-dev/port-c")):
+            routes.update(fetch_routes(rid, name))
+        sleeps = []
+        config = {"queries": [code_query(), "after in:name"], "roots": [], "page_caps": {"code": 2, "search": 10}}
+        run, report, client, paths = collect_code(config, routes, sleep=sleeps.append)
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(run["searches"][0], {"query": LICENCE, "complete": False, "repository_ids": [11], "kind": "code", "resume_cursor": "page=2"})
+        self.assertEqual(paths[:4], ["/search/code", "/search/code", "/search/code", "/search/repositories"])
+        self.assertEqual([r["repository_id"] for r in run["repositories"]], [11, 13])
+        self.assertIsNone(run["collection_report"]["stopped"])
+        self.assertEqual(report["code_search_limited"], 1)
+
+    def test_secondary_limits_elsewhere_still_stop_everything(self):
+        cases = (
+            ("/search/repositories", search_url("first in:name"), {"status": 429, "headers": {"retry-after": "2", "x-ratelimit-resource": "search", "x-ratelimit-remaining": "10"}, "body": {}}),
+            ("/search/repositories", search_url("first in:name"), {"status": 429, "headers": {"x-ratelimit-resource": "search", "x-ratelimit-remaining": "10"}, "body": {}}),
+            ("/repositories/12", "GET /repositories/12", {"status": 403, "headers": {"retry-after": "2", "x-ratelimit-remaining": "4000"}, "body": {}}),
+        )
+        for label, key, answer in cases:
+            with self.subTest(path=label):
+                routes = self.routes(ok({"total_count": 0, "incomplete_results": False, "items": []}, {"x-ratelimit-resource": "code_search"}))
+                routes[key] = answer
+                sleeps = []
+                run, report, client, paths = collect_code(self.CONFIG, routes, sleep=sleeps.append)
+                self.assertEqual(sleeps, [])
+                self.assertEqual(paths.count(label), 1)
+                self.assertEqual(run["collection_report"]["stopped"], "rate_limited")
+                self.assertIs(client.secondary_limited, True)
+                self.assertEqual(paths[-1], label)
+
+    def test_remaining_zero_on_code_search_keeps_the_bucket_rule(self):
+        sleeps = []
+        run, report, client, paths, sleeps = self.collect([dict(CODE_LIMITED, status=429), CODE_SECONDARY])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(paths.count("/search/code"), 1)
+        self.assertEqual(run["collection_report"]["stopped"], "code_search_rate_limited")
+        self.assertIs(client.bucket_exhausted("code_search"), True)
+        self.assertEqual(report["code_search_limited"], 0)
+
+    def test_the_client_refuses_code_search_after_giving_up(self):
+        from collector import github
+
+        sleeps = []
+        client, transport = make_client({code_url(LICENCE): [CODE_SECONDARY, CODE_SECONDARY]}, sleep=sleeps.append)
+        for _ in range(2):
+            with self.assertRaises(github.CodeSearchLimited):
+                client.get("/search/code", {"q": LICENCE, "per_page": 100, "page": 1})
+        self.assertEqual((len(transport.calls), sleeps), (2, [2]))
+        self.assertIs(client.rate_limited, False)
+        self.assertEqual(github._stop_reason(github.CodeSearchLimited("x")), "code_search_secondary_limited")
+        self.assertIs(github.Client(transport)._sleep, time.sleep)
 
 
 class RunFormat(CollectorTestCase):

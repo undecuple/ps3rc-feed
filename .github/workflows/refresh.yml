@@ -8,6 +8,12 @@ name: refresh
 # day. Scheduled runs are 6 hours apart and never overlap (concurrency below), so one hour holds at most one
 # of them, under the built-in token's 1,000 requests an hour. A run started by hand adds up to 801 more; the
 # collector stops on a rate limit.
+#
+# Publishing guard: the collect job fails, after printing the reason, when the run stopped for anything but
+# the request budget (rate_limited, search_rate_limited, code_search_rate_limited, network) or the exported
+# feed lists no repositories; publish-state and deploy then do not run, so nothing is pushed or deployed.
+# A first run (no feed-state branch yet) pushes feed-state but does not deploy: the page is deployed by hand
+# with the pages workflow after the feed has been reviewed.
 
 on:
   schedule:
@@ -30,6 +36,9 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.export.outputs.version }}
+      stopped: ${{ steps.guard.outputs.stopped }}
+      repos: ${{ steps.guard.outputs.repos }}
+      first_run: ${{ steps.state.outputs.exists == 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,6 +140,28 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           mkdir -p data/artifact
           cp data/state.json data/site/feed.json data/site/manifest.json data/artifact/
+      - name: Check the run before anything is published
+        id: guard
+        run: |
+          stopped=$(python3 -B -c 'import json,sys; s=json.load(open(sys.argv[1]))["collection_report"]["stopped"]; print("" if s is None else s)' data/run.json)
+          case "$stopped" in
+            *[!A-Za-z_]*) echo "stop reason is not a plain word"; exit 1 ;;
+          esac
+          repos=$(python3 -B -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["repos"]))' data/site/feed.json)
+          case "$repos" in
+            *[!0-9]*|"") echo "repository count is not a number"; exit 1 ;;
+          esac
+          echo "stopped=$stopped" >> "$GITHUB_OUTPUT"
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+          echo "stop reason: ${stopped:-none}; repositories in the feed: $repos"
+          case "$stopped" in
+            ""|budget) ;;
+            *) echo "the run stopped abnormally ($stopped): nothing is published or deployed"; exit 1 ;;
+          esac
+          if [ "$repos" -eq 0 ]; then
+            echo "the feed lists no repositories: nothing is published or deployed"
+            exit 1
+          fi
       # The run file stays on the runner. The artifact holds state.json, feed.json and manifest.json for one day.
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
@@ -140,7 +171,7 @@ jobs:
 
   publish-state:
     needs: collect
-    if: vars.REFRESH_ENABLED == 'true'
+    if: vars.REFRESH_ENABLED == 'true' && (needs.collect.outputs.stopped == '' || needs.collect.outputs.stopped == 'budget') && needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -164,7 +195,9 @@ jobs:
             echo "the artifact has no state.json"
             exit 1
           fi
-          # The same check the deploy uses: feed.json must match the manifest version from the collect job.
+          # The same check the deploy uses: feed.json must match the manifest version from the collect job,
+          # and must not be under half the size of the committed feed.
+          cp site/data/feed.json "$work/check/feed.json"
           python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" \
             "$work/branch" "$work/check"
           cat > "$work/branch/README.md" <<'EOF'
@@ -189,9 +222,10 @@ jobs:
 
   deploy:
     # Deploys what publish-state pushed, so the page never shows a feed the saved state does not hold.
-    # A push to feed-state starts no other workflow, so the deployment happens here.
+    # A push to feed-state starts no other workflow, so the deployment happens here, except after a first
+    # run: that feed is reviewed on the feed-state branch and deployed by starting the pages workflow by hand.
     needs: [collect, publish-state]
-    if: vars.REFRESH_ENABLED == 'true'
+    if: vars.REFRESH_ENABLED == 'true' && (needs.collect.outputs.stopped == '' || needs.collect.outputs.stopped == 'budget') && needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0' && needs.collect.outputs.first_run == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
