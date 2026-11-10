@@ -347,7 +347,8 @@ class K5PaginationKeepsFetchedPages(CollectorTestCase):
         run, report, client, transport = collect_with(self._two_pages({"status": 403, "headers": {"x-ratelimit-remaining": "0"}, "body": "{}"}))
         schema.validate_run(copy.deepcopy(run))
         self.assertEqual(report["stopped"], "rate_limited")
-        self.assertEqual(run["searches"], [{"query": "ps3recomp in:name", "complete": False, "repository_ids": [90, 100]}])
+        # An interrupted search keeps what page one listed and says where to resume.
+        self.assertEqual(run["searches"], [{"query": "ps3recomp in:name", "complete": False, "repository_ids": [90, 100], "resume_cursor": "page=2"}])
         self.assertEqual(run["roots"], [])
         self.assertEqual(run["repositories"], [])
         self.assertEqual(report["not_fetched_repository_ids"], [90, 100])

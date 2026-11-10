@@ -55,6 +55,18 @@ class DataIsIgnored(unittest.TestCase):
             lines = [line.strip() for line in handle]
         self.assertIn("data/", lines)
 
+    def test_git_itself_ignores_a_run_file_under_data(self):
+        """Ask git, not the text of .gitignore; skipped where git or the checkout is unavailable."""
+        import shutil
+        import subprocess
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if shutil.which("git") is None or not os.path.isdir(os.path.join(root, ".git")):
+            self.skipTest("git or the checkout is not available")
+        for candidate, ignored in (("data/x.json", True), ("data/sub/run.json", True), ("tests/fixtures/README.md", False)):
+            proc = subprocess.run(["git", "check-ignore", "-q", candidate], cwd=root, capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode == 0, ignored, (candidate, proc.stderr))
+
 
 if __name__ == "__main__":
     unittest.main()

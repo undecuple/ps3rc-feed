@@ -7,8 +7,11 @@ credentials, no other host), no fragment, an absolute path of plain
 segments (no empty, "." or ".." segments, no percent-encoded dot, slash
 or backslash). Redirects are errors, never followed. The only URL ever
 taken from a response is a `Link: rel="next"` URL, accepted only when it
-names the same host, the same path and the same query apart from `page`,
-whose value must be the current page plus one, within a page cap.
+names the same host, the same path (or, for a /repos/{owner}/{repo}/...
+request whose repository id is known, exactly /repositories/{id}/... with
+the same suffix, which is how GitHub writes these links) and the same
+query apart from `page`, whose value must be the current page plus one,
+within a page cap.
 
 Transports are callables `transport(method, url, headers, timeout) ->
 Response`. `RecordedTransport` answers from canned responses and is what
@@ -21,11 +24,14 @@ else.
 
 Budget: a hard cap on requests per client; page caps per listing; three
 consecutive transport failures stop the client (`NetworkFailed`). Rate
-limits: a parsed `x-ratelimit-remaining` of 0, a 429, or a 403 carrying
-`retry-after` or a zero remaining stops the client (`RateLimited`); the
-client never sleeps and never forgets a recorded limit within a run.
-Header values that are not bounded integers are ignored (unknown);
-duplicate headers keep the most restrictive value.
+limits are tracked per resource bucket (the x-ratelimit-resource header:
+core, search, ...; an answer without it counts as core): a parsed
+remaining of 0 exhausts that bucket, and a request against an exhausted
+bucket raises RateLimited naming it before any transport call. A 403 or
+429 carrying retry-after, or a 429 while the bucket still has requests
+left, is a secondary limit and stops everything. The client never sleeps and never forgets a
+recorded limit within a run. Header values that are not bounded integers
+are ignored (unknown); duplicate headers keep the most restrictive value.
 
 Responses: body capped (MAX_BODY), headers capped (MAX_HEADER_BYTES),
 strict JSON (no duplicate keys, no NaN/Infinity), shape checked against
@@ -63,6 +69,8 @@ ACCEPT_RAW = "application/vnd.github.raw"
 DEFAULT_PAGE_CAPS = {"search": 10, "forks": 10, "commits": 5}
 MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3
 MAX_HEADER_INT = 10**12
+CORE = "core"
+SEARCH = "search"
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{1,255}\Z")
 _PRINTABLE_RE = re.compile(r"[\x21-\x7e]{1,2048}\Z")
@@ -70,6 +78,7 @@ _PATH_RE = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*\Z")
 _BAD_ESCAPE_RE = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
 _LINK_ENTRY_RE = re.compile(r"<([^<>\s]*)>((?:\s*;\s*[^;]*)*)\Z")
 _DIGITS_RE = re.compile(r"[0-9]{1,13}\Z")
+_RESOURCE_RE = re.compile(r"[a-z_]{1,32}\Z")
 
 
 class GitHubError(Exception):
@@ -97,7 +106,11 @@ class TransportFailed(GitHubError):
 
 
 class RateLimited(GitHubError):
-    """The API rate limit is reached; the run must stop."""
+    """A rate-limit bucket is exhausted (`resource`: core, search, ...) or a secondary limit was hit."""
+
+    def __init__(self, message, resource=CORE):
+        GitHubError.__init__(self, message)
+        self.resource = resource
 
 
 class BudgetExhausted(GitHubError):
@@ -199,9 +212,10 @@ class Pages:
     """Items gathered over pages.
 
     complete is False when the cap or a stop ended the walk; `stopped` says
-    why ("rate_limited", "budget", "network", "transport", "response",
-    "status" or None); `status` is the first page's HTTP status (None when
-    the first page produced no usable response).
+    why ("rate_limited", "search_rate_limited", "budget", "network",
+    "transport", "response", "status" or None); `status` is the first
+    page's HTTP status (None when the first page produced no usable
+    response).
     """
 
     def __init__(self, items, complete, next_cursor, status, stopped=None, extra=None):
@@ -238,6 +252,11 @@ def check_url(url):
     if any(segment in ("", ".", "..") for segment in segments):
         raise TransportRefused("refused: empty or dot path segment")
     return path, parts.query
+
+
+def resource_for_path(path):
+    """The rate-limit bucket a request path draws from."""
+    return SEARCH if path.startswith("/search/") else CORE
 
 
 def canonical_query(params):
@@ -332,14 +351,35 @@ def _query_dict(query):
     return result
 
 
-def check_next_url(next_url, request_path, request_query, expected_page=None):
-    """A next URL must be on the API host, name the same path and the same query apart from `page`.
+def equivalent_path(request_path, next_path, repository_id=None):
+    """True when next_path is the request path, or its /repositories/{id}/... spelling.
+
+    GitHub writes the next link of /repos/{owner}/{repo}/<suffix> as
+    /repositories/{id}/<suffix>. That spelling is accepted only when the
+    collector already knows the repository's id and it matches exactly.
+    """
+    if next_path == request_path:
+        return True
+    if not isinstance(repository_id, int) or isinstance(repository_id, bool) or repository_id < 1:
+        return False
+    if not request_path.startswith("/repos/"):
+        return False
+    parts = request_path.split("/")
+    if len(parts) < 4:
+        return False
+    suffix = "/".join(parts[4:])
+    expected = "/repositories/%d" % repository_id + ("/" + suffix if suffix else "")
+    return next_path == expected
+
+
+def check_next_url(next_url, request_path, request_query, expected_page=None, repository_id=None):
+    """A next URL must be on the API host, name the same (or equivalent) path and the same query apart from `page`.
 
     `page` must be digits; when expected_page is given it must equal it
     (the walk never jumps or loops).
     """
     path, query = check_url(next_url)
-    if path != request_path:
+    if not equivalent_path(request_path, path, repository_id):
         raise TransportRefused("refused: Link next URL names a different path")
     mine = _query_dict(request_query)
     theirs = _query_dict(query)
@@ -580,18 +620,29 @@ class Client:
         self.max_body = max_body
         self.requests_made = 0
         self.log = []
-        self.rate_limited = False
+        self.exhausted = set()
+        self.secondary_limited = False
+        self.limits = {}
         self.rate_limit_reset = None
         self.retry_after = None
         self.consecutive_failures = 0
         self.transport_failures = 0
         self.network_failed = False
 
+    @property
+    def rate_limited(self):
+        """True when the run must stop for rate-limit reasons (core bucket exhausted or a secondary limit)."""
+        return CORE in self.exhausted or self.secondary_limited
+
+    def bucket_exhausted(self, resource):
+        return resource in self.exhausted
+
     def __repr__(self):
-        return "Client(requests_made=%d, max_requests=%d, rate_limited=%r, network_failed=%r, token=%s)" % (
+        return "Client(requests_made=%d, max_requests=%d, rate_limited=%r, exhausted=%s, network_failed=%r, token=%s)" % (
             self.requests_made,
             self.max_requests,
             self.rate_limited,
+            sorted(self.exhausted),
             self.network_failed,
             "set" if self.token is not None else "none",
         )
@@ -603,6 +654,9 @@ class Client:
             "requests_made": self.requests_made,
             "max_requests": self.max_requests,
             "rate_limited": self.rate_limited,
+            "exhausted_resources": sorted(self.exhausted),
+            "secondary_limited": self.secondary_limited,
+            "limits": {k: dict(v) for k, v in sorted(self.limits.items())},
             "rate_limit_reset": self.rate_limit_reset,
             "retry_after": self.retry_after,
             "transport_failures": self.transport_failures,
@@ -620,8 +674,11 @@ class Client:
         if method != "GET":
             raise TransportRefused("refused: only GET is allowed")
         path, query = check_url(url)
+        resource = resource_for_path(path)
         if self.rate_limited:
-            raise RateLimited("rate limit reached; not requesting %s" % path)
+            raise RateLimited("rate limit reached; not requesting %s" % path, CORE)
+        if resource in self.exhausted:
+            raise RateLimited("%s rate limit reached; not requesting %s" % (resource, path), resource)
         if self.network_failed:
             raise NetworkFailed("%d consecutive transport failures; not requesting %s" % (self.consecutive_failures, path))
         if self.requests_made >= self.max_requests:
@@ -662,18 +719,41 @@ class Client:
         return failure
 
     def _note_rate_limit(self, response, path):
+        """Record the bucket's state; raise RateLimited when this answer says the run (or the bucket) is done.
+
+        The bucket is the x-ratelimit-resource header. An answer that does
+        not name one is treated as core, so an unidentified limit stops the
+        whole run rather than letting it continue. The stop raised for a
+        403/429 is labelled by the request path: a non-search path always
+        stops as core whatever the header says, so it ends the run.
+        """
         remaining = header_int(response.headers.get("x-ratelimit-remaining"))
         reset = header_int(response.headers.get("x-ratelimit-reset"), lo=1)
         retry_after = header_int(response.headers.get("retry-after"))
-        if reset is not None and (self.rate_limit_reset is None or reset < self.rate_limit_reset):
-            self.rate_limit_reset = reset
+        resource = response.headers.get("x-ratelimit-resource")
+        if not isinstance(resource, str) or _RESOURCE_RE.fullmatch(resource.strip().lower()) is None:
+            resource = CORE
+        else:
+            resource = resource.strip().lower()
+        limit = self.limits.setdefault(resource, {"remaining": None, "reset": None})
+        if remaining is not None:
+            limit["remaining"] = remaining
+        if reset is not None:
+            limit["reset"] = reset
+            if self.rate_limit_reset is None or reset < self.rate_limit_reset:
+                self.rate_limit_reset = reset
         if retry_after is not None:
             self.retry_after = retry_after
-        limited = remaining == 0 or response.status == 429 or (response.status == 403 and retry_after is not None)
-        if limited:
-            self.rate_limited = True
-        if response.status in (403, 429) and limited:
-            raise RateLimited("rate limited at %s (status %d)" % (path, response.status))
+        if (response.status in (403, 429) and retry_after is not None) or (response.status == 429 and remaining != 0):
+            # A secondary limit (retry-after, or a 429 while the bucket still has requests left): everything stops.
+            self.secondary_limited = True
+            raise RateLimited("secondary rate limit at %s (status %d)" % (path, response.status), CORE)
+        if remaining == 0:
+            self.exhausted.add(resource)
+        if response.status in (403, 429) and remaining == 0:
+            label = resource if resource_for_path(path) == SEARCH else CORE
+            self.exhausted.add(label)
+            raise RateLimited("%s rate limit reached at %s (status %d)" % (resource, path, response.status), label)
 
     def get_url(self, url, accept=ACCEPT_JSON):
         return self.request("GET", url, accept)
@@ -702,14 +782,15 @@ class Client:
             return Result(response.status, None, response.headers)
         return Result(200, response.body.decode("utf-8", errors="replace")[:max_chars], response.headers)
 
-    def paginate(self, path, params, cap, expect="array", items_key=None):
+    def paginate(self, path, params, cap, expect="array", items_key=None, repository_id=None):
         """Walk Link rel="next" pages from page 1 up to `cap` pages.
 
         Returns Pages. A stop (rate limit, budget, network) on page 1 is
         raised; a failure (transport, unusable response or Link) on page 1
         returns no items with `stopped` set; after page 1 the items already
         fetched are returned with complete=False, a "page=N" cursor and
-        `stopped`. The next page must be numbered page + 1.
+        `stopped`. The next page must be numbered page + 1 and may use the
+        /repositories/{repository_id}/... spelling of the request path.
         """
         if not isinstance(cap, int) or cap < 1:
             raise ValueError("page cap must be a positive integer")
@@ -752,7 +833,7 @@ class Client:
             try:
                 next_url = parse_link_next(response.headers.get("link"))
                 if next_url is not None:
-                    check_next_url(next_url, path, request_query, page + 1)
+                    check_next_url(next_url, path, request_query, page + 1, repository_id)
             except (LinkError, TransportRefused):
                 return Pages(items, False, "page=%d" % (page + 1), 200, "response", extra)
             if next_url is None:
@@ -765,7 +846,7 @@ class Client:
 
 def _stop_reason(exc):
     if isinstance(exc, RateLimited):
-        return "rate_limited"
+        return "search_rate_limited" if exc.resource == SEARCH else "rate_limited"
     if isinstance(exc, BudgetExhausted):
         return "budget"
     return "network"

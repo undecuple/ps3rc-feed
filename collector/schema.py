@@ -13,6 +13,7 @@ Discord mentions, control characters and non-GitHub URLs are rejected.
 Repository text in observations is data and is only bounded.
 """
 
+import copy
 import json
 import re
 import unicodedata
@@ -52,6 +53,9 @@ _MENTION_RE = re.compile(r"@(everyone|here)", re.IGNORECASE)
 # other non-200 answer or an unusable body. Neither claims a reason.
 FETCH_STATES = ("ok", "rate_limited", "not_found", "blocked", "failed")
 COLLECTION_STATES = ("ok", "partial", "failing", "stale", "not_found")
+# Why a collection did not finish. search_rate_limited: the search bucket ran
+# out and the searches were cut short while the run continued on other endpoints.
+STOP_REASONS = ("rate_limited", "budget", "network", "search_rate_limited")
 
 
 class SchemaError(ValueError):
@@ -485,7 +489,16 @@ ROOT = Obj(
     },
     optional=("found_repository_ids", "resume_cursor"),
 )
-SEARCH = Obj({"query": QUERY, "complete": Bool(), "repository_ids": List(PositiveId(), MAX_IDS)})
+SEARCH = Obj(
+    {
+        "query": QUERY,
+        "complete": Bool(),
+        "repository_ids": List(PositiveId(), MAX_IDS),
+        # Position to resume an interrupted search from ("page=N").
+        "resume_cursor": Nullable(Text(MAX_TAG)),
+    },
+    optional=("resume_cursor",),
+)
 REJECTED = Obj({"path": Str(pattern=PATH_RE, max_len=128), "reason": Enum(REJECTION_REASONS)})
 MAX_REJECTED = 100
 
@@ -502,7 +515,7 @@ RUN = Obj(
         "collection_report": Obj(
             {
                 "complete": Bool(),
-                "stopped": Nullable(Enum(("rate_limited", "budget", "network"))),
+                "stopped": Nullable(Enum(STOP_REASONS)),
                 "error_count": NonNegInt(),
                 "dropped_items": NonNegInt(),
                 "not_fetched": NonNegInt(),
@@ -515,13 +528,18 @@ RUN = Obj(
 
 
 def validate_run(run):
-    """Check a parsed run document (bounding its free text in place); raise SchemaError.
+    """Check a parsed run document and return a normalised copy; raise SchemaError.
 
-    Hostile per-repository values that the collector can live without (a
-    comparison ref, a scan cursor) are downgraded and listed in
-    run["rejected_fields"]; operator configuration (search queries) and
-    everything structural raises.
+    The argument is not modified. The copy has its free text bounded, its
+    comparison blocks filled, and hostile per-repository values that the
+    collector can live without (a comparison ref, a scan cursor) downgraded
+    and listed in `rejected_fields`; operator configuration (search
+    queries) and everything structural raises.
     """
+    try:
+        run = copy.deepcopy(run)
+    except RecursionError:
+        raise SchemaError("run: nested too deeply") from None
     RUN.check(run, "run")
     # A run validated twice keeps the notes from the first pass.
     rejected = [dict(r) for r in run.get("rejected_fields", [])]
@@ -529,6 +547,10 @@ def validate_run(run):
     for i, search in enumerate(run["searches"]):
         if "://" in search["query"] or _SCHEME_RE.match(search["query"]) is not None:
             raise SchemaError("run.searches[%d].query: a search query must not contain a URL" % i)
+        cursor = search.get("resume_cursor")
+        if cursor is not None and CURSOR_RE.fullmatch(cursor) is None:
+            search["resume_cursor"] = None
+            rejected.append({"path": "searches[%d].resume_cursor" % i, "reason": "invalid_cursor"})
     for i, root in enumerate(run["roots"]):
         cursor = root.get("resume_cursor")
         if cursor is not None and CURSOR_RE.fullmatch(cursor) is None:
@@ -757,7 +779,7 @@ COLLECTION = Obj(
             {
                 "last_run_at": Nullable(TIMESTAMP),
                 "complete": Bool(),
-                "stopped": Nullable(Enum(("rate_limited", "budget", "network"))),
+                "stopped": Nullable(Enum(STOP_REASONS)),
                 "not_fetched": NonNegInt(),
                 "error_count": NonNegInt(),
             }

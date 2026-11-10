@@ -78,8 +78,10 @@ class F1LinearParsingAndLoadBounds(CollectorTestCase):
         r = repo(desc="d" * 10000, readme="# T\n" + "r" * 100000, commits=[(1, T(1))], releases=[(1, "v" * 1000)])
         r["commits"][0]["message"] = "m" * 10000
         data = run(T(5), [r])
-        schema.validate_run(data)
-        got = data["repositories"][0]
+        original = copy.deepcopy(data)
+        normalised = schema.validate_run(data)
+        self.assertEqual(data, original)  # the argument is never modified
+        got = normalised["repositories"][0]
         self.assertEqual(len(got["description"]), schema.MAX_DESCRIPTION)
         self.assertEqual(len(got["readme_excerpt"]), schema.MAX_README)
         self.assertEqual(len(got["commits"][0]["message"]), schema.MAX_MESSAGE)

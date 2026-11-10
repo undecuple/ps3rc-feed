@@ -24,14 +24,43 @@ def _blocked(*args, **kwargs):
     raise NetworkBlocked("network blocked by the test guard")
 
 
+_GUARDED = (
+    (socket.socket, "connect"),
+    (socket.socket, "connect_ex"),
+    (socket, "create_connection"),
+    (socket, "getaddrinfo"),
+)
+
+
+class network_blocked:
+    """Context manager: every socket connect and name lookup raises while active.
+
+    Entering saves the attributes it replaces and exiting restores exactly
+    those, so nested use is safe and an outer block stays in force.
+    """
+
+    def __enter__(self):
+        self._saved = [(owner, name, owner.__dict__.get(name)) for owner, name in _GUARDED]
+        for owner, name in _GUARDED:
+            setattr(owner, name, _blocked)
+        return self
+
+    def __exit__(self, *exc_info):
+        for owner, name, original in self._saved:
+            if original is None:
+                delattr(owner, name) if name in owner.__dict__ else None
+            else:
+                setattr(owner, name, original)
+        return False
+
+
 def block_network():
-    """No test may reach the network: every socket connect and name lookup raises."""
-    socket.socket.connect = _blocked
-    socket.socket.connect_ex = _blocked
-    socket.create_connection = _blocked
-    socket.getaddrinfo = _blocked
+    """Block the network for the rest of the process (the test session's baseline)."""
+    network_blocked().__enter__()
 
 
+# Every test process is blocked from import onward; CollectorTestCase adds a
+# restorable layer per test so the guard can also be proven to restore.
 block_network()
 
 # Keys whose values are allowed to differ between an unchanged re-run and
@@ -118,6 +147,13 @@ EVENT_ID_RE = re.compile(r"^repo-[0-9]+:[a-z_]+(:[0-9a-f]+)?$")
 
 class CollectorTestCase(unittest.TestCase):
     """Base class with the determinism assertion every test must make."""
+
+    def setUp(self):
+        self._network_guard = network_blocked()
+        self._network_guard.__enter__()
+
+    def tearDown(self):
+        self._network_guard.__exit__(None, None, None)
 
     def assertDeterministic(self, runs, stale_threshold=3):
         state_a, events_a = run_runs(runs, stale_threshold)

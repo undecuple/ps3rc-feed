@@ -1,36 +1,15 @@
-"""Command line: a read-only dry run over fixtures, and the collector.
+"""ps3rc-feed command line.
 
-    python3 -B -m collector.cli dry-run [--stale-threshold N] <fixture paths...>
-    python3 -B -m collector.cli collect --config PATH [--recorded FIXTURE] [--run-at TS]
-    python3 -B -m collector.cli collect --config PATH --live --max-requests N --out data/<file>.json [--anonymous]
+  dry-run <fixture paths...>        apply run files under tests/fixtures; print events, catalog, status; write nothing
+  collect --config PATH             print the request plan; with --recorded FIXTURE drive the collector offline
+  collect --config PATH --live ...  read-only GET requests to api.github.com; writes one run file under data/
 
-dry-run: each argument is a scenario directory under tests/fixtures (its
-numbered run files are applied in order) or a run file inside
-tests/fixtures. Prints, as JSON, what the collector would publish. Writes
-nothing.
-
-collect without --live: never touches the network. It prints the plan,
-the list of requests (method, path, query) the collector makes or would
-make, and nothing else. With --recorded it drives the collector against a
-canned-answer file under tests/fixtures (same path rules as dry-run) and
-prints the requests actually made. --out is refused without --live.
-
-collect --live: the only path that constructs the live transport and the
-only path that writes. It refuses to start unless --max-requests is given,
-GITHUB_TOKEN is set (or --anonymous is passed), --out lies under
-<repo>/data/, and the config uses none of the placeholder names of
-config/sources.example.json. GITHUB_TOKEN is read from the environment
-here and nowhere else, handed to the client as a Secret, and sent only as
-the Authorization header to api.github.com. The run file is written
-atomically to --out; stdout gets a summary without the token.
-
-`-B` stops the interpreter from writing bytecode caches; the package also
-sets sys.dont_write_bytecode on import.
-
-Fixture path rules: anything that looks like a URL is refused before it is
-touched; every path component inside the fixture root must be a real
-directory or a regular file, never a symbolic link or a special file; the
-resolved path must stay inside tests/fixtures.
+Live runs need --max-requests (the effective budget is the smaller of the
+flag and the config's max_requests), GITHUB_TOKEN or --anonymous, --out
+under data/ (--overwrite to replace a file) and a config without the
+example placeholders. The run file write path is POSIX only. Every
+request, guard and write is described in the docstrings of collector/github.py,
+collector/collect.py and the functions below.
 """
 
 import argparse
@@ -44,15 +23,15 @@ import sys
 from datetime import datetime, timezone
 
 from . import catalog, collect, events, github, schema, store
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FIXTURE_ROOT = os.path.join(REPO_ROOT, "tests", "fixtures")
+from .paths import DATA_ROOT, FIXTURE_ROOT, REPO_ROOT
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_REFUSED = 2
 EXIT_PARTIAL = 3
-DATA_ROOT = os.path.join(REPO_ROOT, "data")
+
+# write_run_file adds 22 characters (".<16 hex>.tmp") for its temp file; common file systems allow 255 bytes.
+MAX_OUT_NAME_BYTES = 200
 
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 
@@ -84,7 +63,12 @@ def _check_components(real, real_root):
 
 
 def resolve_fixture_path(value, root=None):
-    """Return the real path of `value` if it is a plain path inside `root`, else raise RefusedInput."""
+    """Return the real path of `value` if it is a plain path inside `root`, else raise RefusedInput.
+
+    Anything that looks like a URL is refused before it is touched; every
+    component inside the root must be a real directory or regular file,
+    never a link or a special file; the resolved path must stay inside.
+    """
     if root is None:
         root = FIXTURE_ROOT
     if not isinstance(value, str) or not value:
@@ -172,9 +156,13 @@ def build_parser():
     col.add_argument("--recorded", help="canned-answer file under tests/fixtures/ to drive the collector without the network")
     col.add_argument("--run-at", help="run timestamp YYYY-MM-DDTHH:MM:SSZ (default: now, UTC)")
     col.add_argument("--live", action="store_true", help="use the live transport to api.github.com (read-only GET)")
-    col.add_argument("--anonymous", action="store_true", help="with --live: allow running without GITHUB_TOKEN")
-    col.add_argument("--max-requests", type=int, help="with --live: hard request budget for this run (required)")
-    col.add_argument("--out", help="with --live: run file to write, under the data/ directory")
+    col.add_argument("--anonymous", action="store_true", help="with --live: ignore GITHUB_TOKEN and send no Authorization header")
+    col.add_argument(
+        "--max-requests",
+        type=int,
+        help="with --live: request budget for this run (required, 1-%d); the smaller of this and the config's max_requests applies" % collect.MAX_REQUESTS_LIMIT,
+    )
+    col.add_argument("--out", help="with --live: run file to write, a .json under the data/ directory")
     col.add_argument("--overwrite", action="store_true", help="with --live: replace an existing --out file")
     return parser
 
@@ -187,9 +175,10 @@ def _print(payload):
     sys.stdout.write(json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n")
 
 
-def _refuse(message):
-    sys.stderr.write("refused: %s\n" % message)
-    return 2
+def _require_posix():
+    """The descriptor-based write path uses dir_fd, O_NOFOLLOW and fchmod: POSIX only."""
+    if os.name != "posix":
+        raise RefusedInput("refused: live runs write through POSIX directory descriptors; this platform is not supported")
 
 
 def resolve_out_path(value, overwrite=False):
@@ -202,8 +191,9 @@ def resolve_out_path(value, overwrite=False):
     component from the repository root down to the file is lstat'ed; a
     symbolic link anywhere (data/ itself, a subdirectory, the file) is
     refused. Returns the absolute path; components that do not exist yet
-    are created later by write_run_file.
+    are created later by write_run_file. POSIX only.
     """
+    _require_posix()
     if not isinstance(value, str) or not value:
         raise RefusedInput("refused: --live requires --out under the data/ directory")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
@@ -215,6 +205,8 @@ def resolve_out_path(value, overwrite=False):
         raise RefusedInput("refused: --out must lie under the data/ directory of the repository (%s)" % os.path.relpath(DATA_ROOT, REPO_ROOT))
     if not normalised.endswith(".json") or os.path.basename(normalised) == ".json":
         raise RefusedInput("refused: --out must be a .json file")
+    if len(os.path.basename(normalised).encode("utf-8", errors="surrogateescape")) > MAX_OUT_NAME_BYTES:
+        raise RefusedInput("refused: --out file name is longer than %d bytes" % MAX_OUT_NAME_BYTES)
     walk = os.path.normpath(REPO_ROOT)
     for part in os.path.relpath(normalised, walk).split(os.sep):
         walk = os.path.join(walk, part)
@@ -233,7 +225,7 @@ def resolve_out_path(value, overwrite=False):
     return normalised
 
 
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -255,18 +247,22 @@ def _open_dir(name, dir_fd=None):
 
 
 def write_run_file(run, out_path, overwrite=False):
-    """Write the run through directory descriptors, never following a link.
+    """Write the run through directory descriptors, never following a link. POSIX only.
 
     The repository root is opened, then each component down to the target
     directory with O_DIRECTORY|O_NOFOLLOW relative to the previous
     descriptor (created with mkdir on that descriptor when missing, mode
     0755 before umask). The run goes to a randomly named temp file opened
     with O_CREAT|O_EXCL|O_NOFOLLOW on the directory descriptor, mode 0644,
-    is fsync'ed, renamed over the target with both directory descriptors
-    (after a final lstat of the target), and the directory is fsync'ed. An
+    is fsync'ed and, after a final lstat of the target, published with both
+    directory descriptors: renamed over the target with overwrite=True,
+    otherwise hard-linked to the target name (which fails if anything is
+    there, so the no-overwrite rule holds even against a target created
+    after the check) and then unlinked. The directory is fsync'ed. An
     existing regular target is replaced only with overwrite=True; anything
     else at the target is refused. On any failure the temp file is removed.
     """
+    _require_posix()
     data = (json.dumps(run, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
     root = os.path.normpath(REPO_ROOT)
     relative = os.path.relpath(os.path.normpath(out_path), root)
@@ -294,7 +290,15 @@ def write_run_file(run, out_path, overwrite=False):
                 os.fchmod(fh.fileno(), 0o644)
                 os.fsync(fh.fileno())
             _check_target(name, fd, overwrite)
-            os.rename(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+            if overwrite:
+                os.rename(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+            else:
+                # link() never replaces an existing name, so a target created after the check is refused, not overwritten.
+                try:
+                    os.link(tmp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+                except FileExistsError:
+                    raise RefusedInput("refused: --out exists; pass --overwrite to replace it") from None
+                os.unlink(tmp, dir_fd=fd)
         except BaseException:
             try:
                 os.unlink(tmp, dir_fd=fd)
@@ -352,7 +356,8 @@ def run_collect(args):
         return EXIT_OK
 
     sys.stderr.write("LIVE: read-only GET requests to https://api.github.com will be made.\n")
-    max_requests = _check_max_requests(args.max_requests)
+    # The budget is the smaller of the flag and the config: neither can raise the other.
+    max_requests = min(_check_max_requests(args.max_requests), config["max_requests"])
     if args.anonymous:
         # The environment is not consulted at all: no Authorization header will be sent.
         token_text = None
@@ -380,6 +385,7 @@ def run_collect(args):
             "repositories": len(run["repositories"]),
             "complete": report["complete"],
             "stopped": report["stopped"],
+            "effective_max_requests": max_requests,
             "not_fetched_repository_ids": report["not_fetched_repository_ids"][:100],
             "error_count": report["error_count"],
             "errors": report["errors"],
