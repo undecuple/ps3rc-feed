@@ -52,6 +52,7 @@
     resume: ['resume', 'insert held events'],
     order: ['order newest|oldest', 'time order of the list'],
     scroll: ['scroll auto|manual', 'auto follows the newest edge; manual never moves your view'],
+    untouched: ['untouched show|hide', 'forks with no stars and no commits in 30 days are hidden by default; typing a search shows them'],
     view: ['view feed|table|forks|about', 'also: feed, table, forks, about as commands'],
     subscribe: ['subscribe', 'print the proposed RSS routes'],
     demo: ['demo [n|stop]', 'insert fictional demo events one by one (not real activity)'],
@@ -67,7 +68,7 @@
   const COMMAND_NAMES = Object.keys(HELP).concat(['feed', 'table', 'forks']).sort();
 
   function initialState() {
-    return { view: 'feed', filters: [], search: '', sort: { key: 'time', dir: 'desc' }, group: 'none', paused: false, scroll: 'auto' };
+    return { view: 'feed', filters: [], search: '', sort: { key: 'time', dir: 'desc' }, group: 'none', paused: false, scroll: 'auto', hideUntouched: true };
   }
 
   // ---------- parsing ----------
@@ -248,6 +249,7 @@
       commits: num(r.commits_30d),
       firstSeen: ms(r.first_seen_at),
       time: ms(r.last_commit_at),
+      untouched: r.fork === true && num(r.stars) === 0 && (num(r.commits_30d) === 0 || num(r.ahead) === 0),
       stale: r.collection_failing === true,
       sample: r.sample === true,
       url: r.sample === true ? null : str(r.url),
@@ -520,6 +522,12 @@
       s.scroll = v;
       o.push(ok('scroll: ' + v));
     },
+    untouched(s, args, ctx, o) {
+      const v = (args[0] || '').toLowerCase();
+      if (v !== 'show' && v !== 'hide') return o.push(err('usage: untouched show|hide'));
+      s.hideUntouched = v === 'hide';
+      o.push(ok('untouched forks: ' + (s.hideUntouched ? 'hidden' : 'shown')));
+    },
     subscribe(s, args, ctx, o) {
       o.push('Proposed RSS routes (not deployed, nothing to subscribe to yet):');
       ROUTES.forEach((r) => o.push('  ' + r));
@@ -538,7 +546,7 @@
     status(s, args, ctx, o) {
       (ctx.info || []).forEach((l) => o.push(l));
       o.push('view: ' + s.view + '  sort: ' + sortLabel(s.sort) + '  group: ' + s.group + '  filters: ' + activeSummary(s));
-      o.push('paused: ' + (s.paused ? 'yes' : 'no') + '  scroll: ' + s.scroll);
+      o.push('paused: ' + (s.paused ? 'yes' : 'no') + '  scroll: ' + s.scroll + '  untouched forks: ' + (s.hideUntouched ? 'hidden' : 'shown'));
     },
     about(s, args, ctx, o) {
       s.view = 'about';
@@ -562,6 +570,13 @@
   COMMANDS.feed = (s, a, c, o) => COMMANDS.view(s, ['feed'], c, o);
   COMMANDS.table = (s, a, c, o) => COMMANDS.view(s, ['table'], c, o);
   COMMANDS.forks = (s, a, c, o) => COMMANDS.view(s, ['forks'], c, o);
+
+  // Forks with no stars and no recent commits are noise in a list; a typed search always sees them.
+  function dropUntouched(items, state) {
+    if (!state.hideUntouched || state.search !== '') return items;
+    // demo events carry a real repository's fields but are never hidden
+    return items.filter((r) => r.untouched !== true || (r.kind === 'event' && r.sample === true));
+  }
 
   const MAX_SEARCH = 100;
 
@@ -696,7 +711,7 @@
   return {
     TYPES, ENUMS, FIELDS, SORT_KEYS, GROUPS, VIEWS, ROUTES, COMMAND_NAMES, liveSearchText,
     initialState, tokenize, parseTerm, parseTime, parseSort, safeGithubUrl, typeLabel,
-    deriveStatus, joinData, matches, sortRecords, groupRecords, execute, complete,
+    deriveStatus, joinData, matches, dropUntouched, sortRecords, groupRecords, execute, complete,
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
     orUnknown, gameLabel, eventTime, compareLabel,
   };

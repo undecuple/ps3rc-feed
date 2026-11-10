@@ -20,7 +20,7 @@ const ids = (list) => list.map((r) => r.id);
 
 test('help lists every command and per-command help works', () => {
   const out = run('help').out.map((l) => l.text).join('\n');
-  for (const c of ['help', 'filter', 'sort', 'group', 'search', 'show', 'open', 'pause', 'resume', 'order', 'scroll', 'subscribe', 'demo', 'status', 'about', 'clear', 'reset']) {
+  for (const c of ['help', 'filter', 'sort', 'group', 'search', 'show', 'open', 'pause', 'resume', 'order', 'scroll', 'subscribe', 'demo', 'status', 'about', 'clear', 'reset', 'untouched']) {
     assert.ok(out.includes(c), c);
   }
   assert.ok(run('help filter').out.length > 1);
@@ -406,4 +406,21 @@ test('served data/ is the real export, and the fallback can never show the sampl
   const joined = T.joinData(real, later);
   assert.ok(joined.events.every((e, i) => e.time === Date.parse(real.events[i].source_at || real.events[i].observed_at)));
   assert.ok(joined.events.every((e) => e.time <= Date.parse(real.generated_at)));
+});
+
+test('untouched forks are hidden by default and a search or the toggle shows them', () => {
+  const mk = (id, fork, stars, commits) => ({ id, fork, stars, commits_30d: commits, repo: 'o/r' + id, owner: 'o' });
+  const recs = T.joinData({ repos: [mk(1, true, 0, 0), mk(2, true, 3, 0), mk(3, true, 0, 4), mk(4, false, 0, 0)], events: [] }, Date.now());
+  assert.deepEqual(recs.repos.map((r) => r.untouched), [true, false, false, false]);
+  const s = T.initialState();
+  assert.equal(s.hideUntouched, true);
+  assert.equal(T.dropUntouched(recs.repos, s).length, 3);
+  assert.equal(T.dropUntouched(recs.repos, Object.assign({}, s, { search: 'x' })).length, 4);
+  const demo = Object.assign({}, recs.repos[0], { kind: 'event', sample: true });
+  assert.equal(T.dropUntouched([demo], s).length, 1);
+  const r = run('untouched show', s);
+  assert.equal(r.state.hideUntouched, false);
+  assert.equal(T.dropUntouched(recs.repos, r.state).length, 4);
+  assert.equal(run('untouched maybe', s).out[0].kind, 'error');
+  assert.equal(run('reset', r.state).state.hideUntouched, true);
 });
