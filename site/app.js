@@ -235,6 +235,7 @@
       el('span', 'label', rec.typeLabel),
       el('span', 'game', T.orUnknown(rec.game)),
       el('span', 'repo', T.orUnknown(rec.repo)),
+      el('span', 'stars', T.orUnknown(rec.stars)),
       el('span', 'sum', (rec.summary || '') + (rec.stale ? ' (stale)' : '') + (rec.sample ? ' (sample entry, no link)' : '')),
     );
     li.append(b);
@@ -328,7 +329,8 @@
     } else if (state.view === 'feed') {
       const ul = el('ul', 'feed');
       const head = el('li', 'colhead');
-      ['Time', 'Type', 'Game', 'Repository', 'Summary'].forEach((h) => head.append(sortHead('span', h)));
+      ['Time', 'Type', 'Game', 'Repository', 'Stars', 'Summary'].forEach((h) => head.append(sortHead('span', h)));
+      head.children[4].className = 'stars';
       ul.append(head);
       for (const g of T.groupRecords(shown, state.group)) {
         if (g.label !== null) ul.append(el('li', 'head', '== ' + state.group + ': ' + g.label + ' (' + g.items.length + ') =='));

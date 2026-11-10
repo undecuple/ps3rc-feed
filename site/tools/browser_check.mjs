@@ -231,8 +231,19 @@ for (const [kind, page, search] of runs) {
       r.sortByHeading = { first: first.sort, second: second.sort };
       check(first.vals.length > 5 && first.sort === 'descending' && sorted(first.vals, 'desc'), name + ': first click on Stars sorts descending ' + JSON.stringify(first));
       check(second.sort === 'ascending' && sorted(second.vals, 'asc'), name + ': second click on Stars sorts ascending ' + JSON.stringify(second));
+      // the feed has a Stars column too, and its heading sorts
       await typeLine('sort -time');
       await typeLine('view feed');
+      if (!mobile) {
+        await evalJs("[...document.querySelectorAll('#view .colhead button')].find((b) => /^Stars/.test(b.textContent)).click()");
+        r.feedStars = await evalJs(`(() => {
+          const vals = [...document.querySelectorAll('#view .row .stars')].map((e) => e.textContent).filter((v) => /^[0-9]+$/.test(v)).map(Number);
+          return { rows: document.querySelectorAll('#view .row').length, numeric: vals.length, top: vals.slice(0, 5), headings: [...document.querySelectorAll('#view .colhead > *')].map((e) => e.textContent.replace(/ [▲▼]/, '')) };
+        })()`);
+        check(r.feedStars.headings.join() === 'Time,Type,Game,Repository,Stars,Summary', name + ': feed headings ' + JSON.stringify(r.feedStars.headings));
+        check(r.feedStars.numeric > 5 && r.feedStars.top.every((v, i, a2) => i === 0 || a2[i - 1] >= v), name + ': feed sorts by the Stars heading ' + JSON.stringify(r.feedStars));
+        await typeLine('sort -time');
+      }
     }
     if (kind === 'real' && !mobile) {
       await typeLine('reset');
