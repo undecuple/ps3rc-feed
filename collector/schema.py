@@ -362,8 +362,9 @@ TIMESTAMP = Timestamp()
 SHA = Str(pattern=SHA_RE)
 FULL_NAME = FullName()
 OWNER = NamePart(MAX_OWNER)
-# Operator search queries: GitHub search syntax characters only, no URLs.
-QUERY_RE = re.compile(r"[A-Za-z0-9 _.:/+\-\"()@#]{1,%d}\Z" % MAX_QUERY)
+# Operator search queries: GitHub search syntax characters only, no URLs. The comma is needed for
+# `in:name,description,readme`; queries are always percent-encoded when a request is built.
+QUERY_RE = re.compile(r"[A-Za-z0-9 _.:/+\-\"()@#,]{1,%d}\Z" % MAX_QUERY)
 QUERY = Str(pattern=QUERY_RE, max_len=MAX_QUERY)
 # Git reference names, the subset safe to carry around: no ':', '..', '@{', control or space.
 REF_RE = re.compile(r"(?!.*\.\.)(?!.*@\{)(?!.*/\.)(?!\.)[A-Za-z0-9][A-Za-z0-9._/+\-]{0,%d}\Z" % (MAX_TAG - 1))
