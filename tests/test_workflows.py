@@ -23,7 +23,16 @@ OVERLAY = os.path.join(REPO_ROOT, ".github", "scripts", "overlay_feed.py")
 
 GATE = "if: vars.REFRESH_ENABLED == 'true'"
 # Steps that may hold the token, as (job, step name); None as the step name allows the whole job.
-REFRESH_TOKEN_STEPS = {("collect", "Smoke check code search"), ("collect", "Collect"), ("publish-state", None)}
+REFRESH_TOKEN_STEPS = {
+    ("collect", "Smoke check code search"),
+    ("collect", "Collect"),
+    ("publish-state", None),
+    ("publish-history", "Download the feed"),
+    ("publish-history", "Push to the feed-history branch"),
+}
+# The jobs that may push, and the one branch each may push to; only feed-state is ever force-pushed.
+PUSH_TARGETS = {"publish-state": "feed-state", "publish-history": "feed-history"}
+FORCE_PUSH_JOBS = {"publish-state"}
 
 
 def read(path):
@@ -145,13 +154,16 @@ def check_push_targets(text):
     for job, lines in jobs(text).items():
         for line in lines:
             if re.search(r"\bgit\b.*\bpush\b", line):
-                if job != "publish-state":
+                target = PUSH_TARGETS.get(job)
+                if target is None:
                     problems.append("git push in " + job)
-                if not re.search(r"\sHEAD:refs/heads/feed-state$", line.rstrip()):
-                    problems.append("push target is not refs/heads/feed-state: " + line.strip())
+                elif not re.search(r"\sHEAD:refs/heads/%s$" % re.escape(target), line.rstrip()):
+                    problems.append("push target is not refs/heads/%s: %s" % (target, line.strip()))
                 if re.search(r"\bmain\b|--all|--mirror|--tags", line):
                     problems.append("push may reach another ref: " + line.strip())
-            if "contents: write" in line and job != "publish-state":
+                if job not in FORCE_PUSH_JOBS and re.search(r"--force|\s-[A-Za-z]*f\b|\s\+[A-Za-z]*:?|--mirror", line):
+                    problems.append("force push in " + job)
+            if "contents: write" in line and job not in PUSH_TARGETS:
                 problems.append("contents: write in " + job)
             if "@" in line and "https://" in line and "github.com" in line:
                 problems.append("credential-looking URL in " + job)
@@ -296,6 +308,7 @@ def check_publish_guard(text):
     gate = GATE[len("if: "):]
     expected = {
         "publish-state": gate + " && " + PUBLISHABLE,
+        "publish-history": gate + " && " + PUBLISHABLE,
         "deploy": gate + " && " + PUBLISHABLE + " && needs.collect.outputs.first_run == 'false'",
     }
     for job, condition in expected.items():
@@ -304,6 +317,46 @@ def check_publish_guard(text):
             problems.append("job %s condition is %r" % (job, job_if(head)))
     if 'cp site/data/feed.json "$work/check/feed.json"' not in "\n".join(all_jobs.get("publish-state", [])):
         problems.append("publish-state does not compare with the committed feed")
+    return problems
+
+
+NEEDS = {
+    "publish-state": "    needs: collect",
+    "publish-history": "    needs: collect",
+    "deploy": "    needs: [collect, publish-state]",
+}
+HISTORY_LINES = [
+    "          git ls-remote --exit-code --heads origin refs/heads/feed-history > /dev/null || rc=$?",
+    "          elif [ \"$rc\" -eq 2 ]; then",
+    "            echo \"could not list the remote branches (exit $rc)\"",
+    "          ref: feed-history",
+    "          path: data/history",
+    "          git init -q -b feed-history data/history",
+    'cp site/data/feed.json "$work/check/feed.json"',
+    '          python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" \\',
+    "        run: python3 -B -m collector history --feed data/feed/feed.json --history-dir data/history",
+    "          if git diff --cached --quiet; then",
+]
+
+
+def check_history_job(text):
+    """publish-history and deploy stay independent; publish-history finds its branch by exit code, checks the feed
+    like publish-state, runs the history command and commits only a change."""
+    problems = []
+    all_jobs = jobs(text)
+    for job, line in NEEDS.items():
+        head, _ = split_steps(all_jobs.get(job, []))
+        needs = [l for l in head if l.startswith("    needs:")]
+        if needs != [line]:
+            problems.append("job %s needs %r" % (job, needs))
+    body = "\n".join(all_jobs.get("publish-history", []))
+    for line in HISTORY_LINES:
+        if line not in body:
+            problems.append("publish-history lacks: " + line.strip())
+    _, steps = split_steps(all_jobs.get("publish-history", []))
+    for step in steps:
+        if any(line.strip().startswith("continue-on-error") for line in step):
+            problems.append("publish-history step may fail silently: %s" % step_name(step))
     return problems
 
 
@@ -321,6 +374,7 @@ def refresh_problems(text):
         + check_checkout_credentials(text)
         + check_triggers(text)
         + check_publish_guard(text)
+        + check_history_job(text)
     )
 
 
@@ -350,7 +404,7 @@ class WorkflowFiles(unittest.TestCase):
         self.assertEqual(refresh_problems(self.refresh), [])
 
     def test_refresh_jobs(self):
-        self.assertEqual(sorted(jobs(self.refresh)), ["collect", "deploy", "publish-state"])
+        self.assertEqual(sorted(jobs(self.refresh)), ["collect", "deploy", "publish-history", "publish-state"])
 
     def test_other_workflows(self):
         for name in sorted(os.listdir(WORKFLOWS)):
@@ -447,6 +501,33 @@ MUTATIONS = [
     ("cancel in progress", "  group: refresh\n  cancel-in-progress: false", "  group: refresh\n  cancel-in-progress: true"),
     ("dispatch input", "  workflow_dispatch:\n", "  workflow_dispatch:\n    inputs:\n      budget:\n        default: '900'\n"),
     ("push trigger", "  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n"),
+    # publish-history
+    ("history force push", 'git push -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-history',
+     'git push -q --force "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-history'),
+    ("history short force push", 'git push -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-history',
+     'git push -qf "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-history'),
+    ("history plus refspec", "HEAD:refs/heads/feed-history", "+HEAD:refs/heads/feed-history"),
+    ("history pushes feed-state", "HEAD:refs/heads/feed-history", "HEAD:refs/heads/feed-state"),
+    ("history pushes main", "HEAD:refs/heads/feed-history", "HEAD:refs/heads/main"),
+    ("contents write in deploy", "    permissions:\n      contents: read\n      pages: write", "    permissions:\n      contents: write\n      pages: write"),
+    ("history ungated", "    needs: collect\n    if: vars.REFRESH_ENABLED == 'true' && (needs.collect.outputs.stopped == '' || needs.collect.outputs.stopped == 'budget') && needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0'\n    runs-on: ubuntu-latest\n    timeout-minutes: 15",
+     "    needs: collect\n    if: always()\n    runs-on: ubuntu-latest\n    timeout-minutes: 15"),
+    ("history skips first runs", "needs.collect.outputs.repos != '0'\n    runs-on: ubuntu-latest\n    timeout-minutes: 15",
+     "needs.collect.outputs.repos != '0' && needs.collect.outputs.first_run == 'false'\n    runs-on: ubuntu-latest\n    timeout-minutes: 15"),
+    ("deploy waits for history", "    needs: [collect, publish-state]", "    needs: [collect, publish-state, publish-history]"),
+    ("publish-state waits for history", "    needs: collect\n    if: vars.REFRESH_ENABLED == 'true' && (needs.collect.outputs.stopped == '' || needs.collect.outputs.stopped == 'budget') && needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0'\n    runs-on: ubuntu-latest\n    timeout-minutes: 10",
+     "    needs: [collect, publish-history]\n    if: vars.REFRESH_ENABLED == 'true' && (needs.collect.outputs.stopped == '' || needs.collect.outputs.stopped == 'budget') && needs.collect.outputs.repos != '' && needs.collect.outputs.repos != '0'\n    runs-on: ubuntu-latest\n    timeout-minutes: 10"),
+    ("token in history update", "      - name: Update the history\n", "      - name: Update the history\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n"),
+    ("history checkout keeps credentials", "          ref: feed-history\n          path: data/history\n          persist-credentials: false\n", "          ref: feed-history\n          path: data/history\n"),
+    ("history branch probe ignores errors", '          elif [ "$rc" -eq 2 ]; then\n            echo "exists=false" >> "$GITHUB_OUTPUT"\n            echo "no feed-history',
+     '          elif true; then\n            echo "exists=false" >> "$GITHUB_OUTPUT"\n            echo "no feed-history'),
+    ("history without version check", '          python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" \\\n            data/feed', "          true \\\n            data/feed"),
+    ("history without size check", 'cp site/data/feed.json "$work/check/feed.json"\n          python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" \\\n            data/feed',
+     'true\n          python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" \\\n            data/feed'),
+    ("history command missing", "        run: python3 -B -m collector history --feed data/feed/feed.json --history-dir data/history", "        run: true"),
+    ("history commits without a change", "          if git diff --cached --quiet; then", "          if false; then"),
+    ("history may fail silently", "      - name: Update the history\n", "      - name: Update the history\n        continue-on-error: true\n"),
+    ("history no timeout", "    timeout-minutes: 15\n    permissions:\n      contents: write", "    permissions:\n      contents: write"),
 ]
 
 

@@ -6,17 +6,18 @@
                                     (--previous-state sets the fetch order from a state saved by export)
   export --runs FILE... --out-dir D apply run files under data/; write the site's feed.json and manifest.json to D
                                     (--state-in / --state-out carry the store from one export to the next)
+  history --feed F --history-dir D  append a feed.json to the history directory D, both under data/ (docs/history.md)
 
-Live runs need --max-requests (the effective budget is the smaller of the
-flag and the config's max_requests), GITHUB_TOKEN or --anonymous, --out
-under data/ (--overwrite to replace a file) and a config without the
-example placeholders. The run file write path is POSIX only. Every
-request, guard and write is described in the docstrings of collector/github.py,
-collector/collect.py and the functions below.
+Live runs need --max-requests (the effective budget is the smaller of the flag
+and the config's max_requests), GITHUB_TOKEN or --anonymous, --out under data/
+(--overwrite to replace a file) and a config without the example placeholders.
+The run file write path is POSIX only. Every request, guard and write is
+described in the docstrings of collector/github.py, collector/collect.py and the functions below.
 """
 
 import argparse
 import errno
+import gzip
 import json
 import os
 import re
@@ -25,7 +26,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 
-from . import catalog, collect, events, export, github, schema, store
+from . import catalog, collect, events, export, github, history, schema, store
 from .paths import DATA_ROOT, FIXTURE_ROOT, REPO_ROOT
 
 EXIT_OK = 0
@@ -185,6 +186,17 @@ def build_parser():
         "--stale-after-minutes",
         type=int,
         help="set the feed's stale_after_minutes (%d-%d); omitted from the feed when not given" % (MIN_STALE_MINUTES, MAX_STALE_MINUTES),
+    )
+    his = sub.add_parser("history", help="append a feed.json to the history directory (events and change-only snapshots); no network")
+    source = his.add_mutually_exclusive_group(required=True)
+    source.add_argument("--feed", help="feed.json written by export (.json under data/): its new events and a snapshot of its repositories")
+    source.add_argument("--import-feed", help="an older feed.json (.json under data/): only its events, marked with --label; no snapshot")
+    his.add_argument("--label", help="with --import-feed: the source label of the imported events (lowercase letters, digits, -), e.g. legacy")
+    his.add_argument("--history-dir", required=True, help="history directory under data/ (a checkout of the feed-history branch, or a new directory)")
+    his.add_argument(
+        "--compact-older-than-months",
+        type=int,
+        help="gzip the month files more than N months (1-%d) before the last run's month; off when not given" % history.MAX_COMPACT_MONTHS,
     )
     return parser
 
@@ -534,6 +546,218 @@ def run_export(args):
     return EXIT_OK
 
 
+HISTORY_ROOT_ENTRIES = (".git", history.README_NAME, history.INDEX_NAME) + history.KINDS
+
+
+def resolve_history_dir(value):
+    """--history-dir: a directory strictly under data/, with no symbolic link and no non-directory on the way.
+
+    The directory may not exist yet (it is created on the first write).
+    Returns the absolute, normalised path.
+    """
+    if not isinstance(value, str) or not value:
+        raise RefusedInput("refused: --history-dir must name a directory under the data/ directory")
+    _check_path_text(value, "--history-dir")
+    candidate = value if os.path.isabs(value) else os.path.join(REPO_ROOT, value)
+    normalised = os.path.normpath(candidate)
+    data_root = os.path.normpath(DATA_ROOT)
+    if not normalised.startswith(data_root + os.sep):
+        raise RefusedInput("refused: --history-dir must lie under the data/ directory of the repository (%s)" % os.path.relpath(DATA_ROOT, REPO_ROOT))
+    walk = os.path.normpath(REPO_ROOT)
+    for part in os.path.relpath(normalised, walk).split(os.sep):
+        walk = os.path.join(walk, part)
+        try:
+            st = os.lstat(walk)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            raise RefusedInput("refused: --history-dir path contains a symbolic link")
+        if not stat.S_ISDIR(st.st_mode):
+            raise RefusedInput("refused: --history-dir path component is not a directory")
+    return normalised
+
+
+def resolve_feed_input(value, flag, history_dir):
+    """--feed or --import-feed: a regular .json file under data/ (the --runs path rules), outside the history directory."""
+    _check_path_text(value, flag)
+    real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory")
+    st = os.lstat(real)
+    if not (stat.S_ISREG(st.st_mode) and real.endswith(".json")):
+        raise RefusedInput("refused: %s takes a .json feed file under the data/ directory" % flag)
+    if real == history_dir or real.startswith(history_dir + os.sep) or real.startswith(os.path.realpath(history_dir) + os.sep):
+        raise RefusedInput("refused: %s lies inside --history-dir" % flag)
+    if st.st_size > history.MAX_FEED_BYTES:
+        raise RefusedInput("refused: %s is larger than %d bytes" % (flag, history.MAX_FEED_BYTES))
+    return real
+
+
+def _read_regular(path, what):
+    """Bytes of a regular file opened without following a link (refused when it is a link or not a regular file)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RefusedInput("refused: %s is a symbolic link" % what) from None
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise RefusedInput("refused: %s is not a regular file" % what)
+        return fh.read()
+
+
+def read_history_dir(history_dir):
+    """(index bytes or None, {month file name: bytes}, README bytes or None) of a history directory.
+
+    Only the history's own entries may be there: .git (left alone), README.md,
+    index.json, events/ and snapshots/ holding month files. Anything else, a
+    symbolic link or a special file is refused, so nothing unexpected is
+    committed with the history.
+    """
+    if not os.path.lexists(history_dir):
+        return None, {}, None
+    index_bytes = None
+    readme = None
+    files = {}
+    for name in sorted(os.listdir(history_dir)):
+        path = os.path.join(history_dir, name)
+        st = os.lstat(path)
+        if name not in HISTORY_ROOT_ENTRIES:
+            raise RefusedInput("refused: --history-dir holds %r, which is not part of the history" % name)
+        if name == ".git":
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            raise RefusedInput("refused: --history-dir entry %s is a symbolic link" % name)
+        if name in history.KINDS:
+            if not stat.S_ISDIR(st.st_mode):
+                raise RefusedInput("refused: --history-dir entry %s is not a directory" % name)
+            for entry in sorted(os.listdir(path)):
+                rel = name + "/" + entry
+                if history.FILE_RE.fullmatch(rel) is None:
+                    raise RefusedInput("refused: --history-dir holds %r, which is not a month file" % rel)
+                files[rel] = _read_regular(os.path.join(path, entry), rel)
+        elif name == history.INDEX_NAME:
+            index_bytes = _read_regular(path, name)
+        else:
+            readme = _read_regular(path, name)
+    return index_bytes, files, readme
+
+
+def _check_compact_months(value):
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= history.MAX_COMPACT_MONTHS:
+        raise RefusedInput("refused: --compact-older-than-months must be between 1 and %d" % history.MAX_COMPACT_MONTHS)
+    return value
+
+
+def run_history(args):
+    """Append one feed to the history directory (docs/history.md). Never touches the network.
+
+    --feed applies a run: the feed's events whose id is not stored yet go to
+    the month of their observed_at, and a snapshot of its repositories
+    (header plus changed repositories only) goes to the month of its
+    generated_at. A feed whose generated_at equals the history's last run is
+    a no-op (exit 0); an older one is refused (exit 2). --import-feed adds
+    an older feed's events with "source": --label and no snapshot.
+
+    Every path is checked first: --history-dir under data/ with no link,
+    the feed a regular .json under data/ outside the history directory.
+    Then the history is read and checked against its index.json, the feed
+    is validated, and every output is built before the first write. A file
+    over history.MAX_FILE_BYTES is refused before anything is written. The
+    month files are written first and index.json last, each atomically
+    (temp file, then rename); a failure in between leaves an index that no
+    longer matches, and the next run stops with an error instead of
+    building on it (the history directory is a git checkout: restore it
+    with git). Nothing outside the history directory is written, and
+    nothing is read but the feed and the history directory.
+    """
+    history_dir = resolve_history_dir(args.history_dir)
+    compact = _check_compact_months(args.compact_older_than_months)
+    if args.import_feed is not None:
+        if args.label is None or history.SOURCE_LABEL_RE.fullmatch(args.label) is None:
+            raise RefusedInput("refused: --import-feed needs --label: 1-32 lowercase letters, digits or -, starting with a letter")
+        feed_path = resolve_feed_input(args.import_feed, "--import-feed", history_dir)
+    else:
+        if args.label is not None:
+            raise RefusedInput("refused: --label is only used with --import-feed")
+        feed_path = resolve_feed_input(args.feed, "--feed", history_dir)
+    index_bytes, files, readme = read_history_dir(history_dir)
+    rel_feed = os.path.relpath(feed_path, REPO_ROOT)
+    try:
+        archive = history.History.load(index_bytes, files)
+    except schema.SchemaError as exc:
+        raise schema.SchemaError("--history-dir %s is not a usable history: %s" % (os.path.relpath(history_dir, REPO_ROOT), exc)) from None
+    try:
+        feed = history.validate_feed(schema.read_json(feed_path), require_collection=args.import_feed is None)
+    except schema.SchemaError as exc:
+        detail = str(exc).replace(feed_path + ": ", "").replace(feed_path, rel_feed)
+        raise schema.SchemaError("%s is not a usable feed: %s" % (rel_feed, detail)) from None
+    summary = {"history_dir": os.path.relpath(history_dir, REPO_ROOT), "feed": rel_feed}
+    if args.import_feed is not None:
+        added, known = archive.import_events(feed, args.label)
+        summary.update({"mode": "import", "label": args.label, "events_added": added, "events_already_stored": known})
+    else:
+        applied = archive.apply_run(feed)
+        if applied is None:
+            summary.update({"mode": "run", "run_at": feed["generated_at"], "unchanged": True})
+            sys.stderr.write("the history already holds the run of %s; nothing to do\n" % feed["generated_at"])
+            _print(summary)
+            return EXIT_OK
+        summary.update({"mode": "run"}, **applied)
+    compacted = archive.compact(compact) if compact is not None else []
+    new_files = archive.render()
+    for name, raw in sorted(new_files.items()):
+        if len(raw) > history.MAX_FILE_BYTES:
+            raise history.Refused(
+                "refused: %s would be %d bytes, over the per-file limit of %d bytes; nothing was written (see docs/history.md)"
+                % (name, len(raw), history.MAX_FILE_BYTES)
+            )
+    new_index = archive.index_bytes(new_files)
+    readme_bytes = history.README_TEXT.encode("utf-8")
+    writes = [(name, raw) for name, raw in sorted(new_files.items()) if files.get(name) != raw]
+    removals = sorted(name for name in files if name not in new_files)
+    if readme != readme_bytes:
+        writes.append((history.README_NAME, readme_bytes))
+    if index_bytes != new_index:
+        writes.append((history.INDEX_NAME, new_index))
+    for name, raw in writes:
+        reason = history.unsafe_text(raw if not name.endswith(".gz") else gzip.decompress(raw))
+        if reason is not None:
+            raise schema.SchemaError("%s would hold %s; nothing was written" % (name, reason))
+    for name, raw in writes:
+        if name == history.INDEX_NAME:
+            continue
+        _write_bytes(raw, os.path.join(history_dir, *name.split("/")), overwrite=True, flag="--history-dir")
+    for name in removals:
+        path = os.path.join(history_dir, *name.split("/"))
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise RefusedInput("refused: %s is not a regular file" % name)
+        os.unlink(path)
+    if index_bytes != new_index:
+        _write_bytes(new_index, os.path.join(history_dir, history.INDEX_NAME), overwrite=True, flag="--history-dir")
+    total = sum(len(raw) for raw in new_files.values())
+    summary.update(
+        {
+            "written": [name for name, _ in writes],
+            "removed": removals,
+            "compacted": compacted,
+            "files": {name: len(raw) for name, raw in sorted(new_files.items())},
+            "total_bytes": total,
+            "file_limit_bytes": history.MAX_FILE_BYTES,
+            "budget_bytes": history.BUDGET_BYTES,
+            "over_budget": total > history.BUDGET_BYTES,
+        }
+    )
+    if total > history.BUDGET_BYTES:
+        sys.stderr.write(
+            "warning: the history holds %d bytes, over the budget of %d bytes; plan compaction or thinning (docs/history.md)\n"
+            % (total, history.BUDGET_BYTES)
+        )
+    _print(summary)
+    return EXIT_OK
+
+
 def _code_queries(config):
     return sum(1 for q in config["queries"] if collect.query_kind(q) == "code")
 
@@ -654,6 +878,8 @@ def main(argv=None):
             return run_collect(args)
         if args.command == "export":
             return run_export(args)
+        if args.command == "history":
+            return run_history(args)
         if args.command != "dry-run":
             parser.print_usage(sys.stderr)
             return EXIT_REFUSED
@@ -661,7 +887,7 @@ def main(argv=None):
             sys.stderr.write("refused: at least one fixture path is required\n")
             return EXIT_REFUSED
         payload = dry_run(args.paths, stale_threshold=args.stale_threshold)
-    except RefusedInput as exc:
+    except (RefusedInput, history.Refused) as exc:
         sys.stderr.write("%s\n" % exc)
         return EXIT_REFUSED
     except (github.GitHubError, schema.SchemaError) as exc:
