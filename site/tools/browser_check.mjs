@@ -140,6 +140,27 @@ for (const [kind, page, search] of runs) {
     r.badge = await evalJs("document.querySelector('.badge').textContent.slice(0, 60)");
     const shot = async (suffix) => writeFileSync(join(shots, name + suffix + '.png'), Buffer.from((await cmd('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
     await shot('');
+    // the notice and the About view are built from the served feed, not fixed text
+    {
+      const served = JSON.parse(readFileSync(join(kind === 'sample' ? sampleDir : realDir, 'data', 'feed.json'), 'utf8'));
+      const iso = new Date(Date.parse(served.generated_at)).toISOString();
+      const when = 'Last collected: ' + iso.slice(0, 10) + ' ' + iso.slice(11, 16) + ' UTC.';
+      r.notice = await evalJs("document.getElementById('notice').textContent");
+      await typeLine('about');
+      r.aboutNotice = await evalJs("(document.getElementById('about-notice') || {}).textContent || null");
+      r.aboutText = await evalJs("document.getElementById('view').textContent");
+      await shot('-about');
+      await typeLine('view feed');
+      for (const [what, text] of [['notice', r.notice], ['About', r.aboutText]]) {
+        check(typeof text === 'string' && text.includes(when), name + ': ' + what + ' does not state the collection time ' + when);
+        check(!/by hand|three read-only|collection runs/i.test(text || ''), name + ': ' + what + ' has fixed wording about how the data was published');
+        check(/not real time/i.test(text || '') && /No game files/.test(text || '') && /inferred and may be wrong/.test(text || ''), name + ': ' + what + ' lacks a required sentence');
+      }
+      check(r.aboutNotice === r.notice, name + ': About notice differs from the badge notice');
+      if (kind === 'sample') check(r.notice.startsWith('SAMPLE (fictional): '), name + ': sample notice is not labelled');
+      else check(!/SAMPLE/.test(r.notice) && r.notice.includes('Repository metadata comes from GitHub.'), name + ': real notice');
+      if (!served.collection) check(r.notice.includes('The collection state is unknown.') && !/was complete|was incomplete/.test(r.notice), name + ': feed has no collection object but the notice claims a state');
+    }
     if (kind === 'real') {
       const times = await evalJs("[...document.querySelectorAll('#view .row .time')].map(x => x.textContent)");
       const clock = new Date().toISOString().slice(11, 16);
