@@ -15,3 +15,4 @@ A repository is `fetch_state: ok`, or a failure state (`rate_limited`, `not_foun
 | forks_two_roots | one fork found via two roots, nested fork, incomplete scan, fork keeping no upstream name or README |
 | classification_change | README retitle changes the inferred game |
 | hostile_text | HTML, mentions, shell text, javascript: links, XML breakout, bidi, oversized and control characters |
+| github_recorded | canned API answers (not run files) for the recorded transport: one search, one root, two repositories |

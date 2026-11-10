@@ -48,7 +48,9 @@ DIGITS_RE = re.compile(r"[0-9]+\Z")
 _SCHEME_RE = re.compile(r"(javascript|data|vbscript|file|ftp|http):", re.IGNORECASE)
 _MENTION_RE = re.compile(r"@(everyone|here)", re.IGNORECASE)
 
-FETCH_STATES = ("ok", "rate_limited", "not_found")
+# blocked: the source answered 403 (not a rate limit) or 451; failed: any
+# other non-200 answer or an unusable body. Neither claims a reason.
+FETCH_STATES = ("ok", "rate_limited", "not_found", "blocked", "failed")
 COLLECTION_STATES = ("ok", "partial", "failing", "stale", "not_found")
 
 

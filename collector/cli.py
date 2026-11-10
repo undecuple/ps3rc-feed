@@ -1,20 +1,36 @@
-"""Read-only dry-run CLI.
+"""Command line: a read-only dry run over fixtures, and the collector.
 
     python3 -B -m collector.cli dry-run [--stale-threshold N] <fixture paths...>
+    python3 -B -m collector.cli collect --config PATH [--recorded FIXTURE] [--run-at TS]
+    python3 -B -m collector.cli collect --config PATH --live --max-requests N --out data/<file>.json [--anonymous]
 
-Each argument is a scenario directory under tests/fixtures (its numbered
-run files are applied in order) or a run file inside tests/fixtures. The
-command prints, as JSON, what the collector would publish: the events of
-every run, the resulting catalog and the collection status. It writes
-nothing and has no network code. (`-B` stops the interpreter from writing
-bytecode caches; the package also sets sys.dont_write_bytecode on import,
-which covers every module imported after it.)
+dry-run: each argument is a scenario directory under tests/fixtures (its
+numbered run files are applied in order) or a run file inside
+tests/fixtures. Prints, as JSON, what the collector would publish. Writes
+nothing.
 
-Input rules: anything that looks like a URL is refused before it is
+collect without --live: never touches the network. It prints the plan,
+the list of requests (method, path, query) the collector makes or would
+make, and nothing else. With --recorded it drives the collector against a
+canned-answer file under tests/fixtures (same path rules as dry-run) and
+prints the requests actually made. --out is refused without --live.
+
+collect --live: the only path that constructs the live transport and the
+only path that writes. It refuses to start unless --max-requests is given,
+GITHUB_TOKEN is set (or --anonymous is passed), --out lies under
+<repo>/data/, and the config uses none of the placeholder names of
+config/sources.example.json. GITHUB_TOKEN is read from the environment
+here and nowhere else, handed to the client as a Secret, and sent only as
+the Authorization header to api.github.com. The run file is written
+atomically to --out; stdout gets a summary without the token.
+
+`-B` stops the interpreter from writing bytecode caches; the package also
+sets sys.dont_write_bytecode on import.
+
+Fixture path rules: anything that looks like a URL is refused before it is
 touched; every path component inside the fixture root must be a real
 directory or a regular file, never a symbolic link or a special file; the
-resolved path must stay inside tests/fixtures. Directory entries are
-checked the same way.
+resolved path must stay inside tests/fixtures.
 """
 
 import argparse
@@ -23,11 +39,13 @@ import os
 import re
 import stat
 import sys
+from datetime import datetime, timezone
 
-from . import catalog, events, schema, store
+from . import catalog, collect, events, github, schema, store
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE_ROOT = os.path.join(REPO_ROOT, "tests", "fixtures")
+DATA_ROOT = os.path.join(REPO_ROOT, "data")
 
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 
@@ -142,7 +160,90 @@ def build_parser():
     dry = sub.add_parser("dry-run", help="print what would be published from fixture run files; writes nothing")
     dry.add_argument("--stale-threshold", type=int, default=3, help="consecutive failures before collection_stale (default 3)")
     dry.add_argument("paths", nargs="*", help="scenario directories or run files under tests/fixtures/")
+    col = sub.add_parser("collect", help="plan or run a collection; only --live reaches the network and writes")
+    col.add_argument("--config", required=True, help="sources config (see config/sources.example.json)")
+    col.add_argument("--recorded", help="canned-answer file under tests/fixtures/ to drive the collector without the network")
+    col.add_argument("--run-at", help="run timestamp YYYY-MM-DDTHH:MM:SSZ (default: now, UTC)")
+    col.add_argument("--live", action="store_true", help="use the live transport to api.github.com (read-only GET)")
+    col.add_argument("--anonymous", action="store_true", help="with --live: allow running without GITHUB_TOKEN")
+    col.add_argument("--max-requests", type=int, help="with --live: hard request budget for this run (required)")
+    col.add_argument("--out", help="with --live: run file to write, under the data/ directory")
     return parser
+
+
+def _now_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _print(payload):
+    sys.stdout.write(json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n")
+
+
+def _refuse(message):
+    sys.stderr.write("refused: %s\n" % message)
+    return 2
+
+
+def run_collect(args):
+    config = collect.load_config(args.config)
+    run_at = args.run_at or _now_utc()
+    schema.TIMESTAMP.check(run_at, "--run-at")
+
+    if not args.live:
+        if args.out:
+            return _refuse("--out requires --live; without --live nothing is written")
+        if args.recorded:
+            recorded_path = resolve_fixture_path(args.recorded)
+            if not stat.S_ISREG(os.lstat(recorded_path).st_mode):
+                raise RefusedInput("refused: --recorded must name a regular file under tests/fixtures")
+            transport = github.RecordedTransport.from_file(recorded_path)
+            client = github.Client(transport, max_requests=config["max_requests"], page_caps=config["page_caps"])
+            collect.collect(client, config, run_at)
+            _print({"plan": client.log})
+        else:
+            _print({"plan": collect.plan_requests(config)})
+        return 0
+
+    sys.stderr.write("LIVE: read-only GET requests to https://api.github.com will be made.\n")
+    if args.max_requests is None:
+        return _refuse("--live requires an explicit --max-requests")
+    if args.max_requests < 1:
+        return _refuse("--max-requests must be at least 1")
+    token_text = os.environ.get("GITHUB_TOKEN") or None
+    if token_text is None and not args.anonymous:
+        return _refuse("GITHUB_TOKEN is not set; export it or pass --anonymous for unauthenticated public access")
+    if not args.out:
+        return _refuse("--live requires --out under the data/ directory")
+    out_path = os.path.realpath(args.out)
+    data_root = os.path.realpath(DATA_ROOT)
+    if not out_path.startswith(data_root + os.sep) or not out_path.endswith(".json"):
+        return _refuse("--out must be a .json file under the data/ directory (%s)" % os.path.relpath(DATA_ROOT, REPO_ROOT))
+    placeholders = collect.config_uses_example_names(config)
+    if placeholders:
+        return _refuse("config uses placeholder names from config/sources.example.json: %s" % ", ".join(sorted(placeholders)))
+
+    token = github.Secret(token_text) if token_text is not None else None
+    transport = github.LiveTransport()
+    client = github.Client(transport, token=token, max_requests=args.max_requests, page_caps=config["page_caps"])
+    run, report = collect.collect(client, config, run_at)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(run, fh, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False)
+        fh.write("\n")
+    os.replace(tmp, out_path)
+    _print(
+        {
+            "written": os.path.relpath(out_path, REPO_ROOT),
+            "run_at": run_at,
+            "repositories": len(run["repositories"]),
+            "stopped": report["stopped"],
+            "not_fetched_repository_ids": report["not_fetched_repository_ids"],
+            "errors": report["errors"],
+            "client": report["client"],
+        }
+    )
+    return 0
 
 
 def main(argv=None):
@@ -151,21 +252,26 @@ def main(argv=None):
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code) if exc.code is not None else 2
-    if args.command != "dry-run":
-        parser.print_usage(sys.stderr)
-        return 2
-    if not args.paths:
-        sys.stderr.write("refused: at least one fixture path is required\n")
-        return 2
     try:
+        if args.command == "collect":
+            return run_collect(args)
+        if args.command != "dry-run":
+            parser.print_usage(sys.stderr)
+            return 2
+        if not args.paths:
+            sys.stderr.write("refused: at least one fixture path is required\n")
+            return 2
         payload = dry_run(args.paths, stale_threshold=args.stale_threshold)
     except RefusedInput as exc:
         sys.stderr.write("%s\n" % exc)
         return 2
+    except github.GitHubError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
     except (schema.SchemaError, ValueError, OSError) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
-    sys.stdout.write(json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n")
+    _print(payload)
     return 0
 
 

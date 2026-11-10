@@ -1,0 +1,14 @@
+{
+  "_comment": "Placeholders only. Every name here is fictional and the live collector refuses a config that still uses any of them. The real roots and queries are decided by the project manager and are not committed.",
+  "queries": [
+    "example-recomp-placeholder in:name"
+  ],
+  "roots": [
+    {"repository_id": 1, "full_name": "example-org/example-recomp-placeholder"}
+  ],
+  "commit_window_days": 30,
+  "max_requests": 500,
+  "max_repositories": 500,
+  "readme_bytes": 16384,
+  "page_caps": {"search": 10, "forks": 10, "commits": 5}
+}
