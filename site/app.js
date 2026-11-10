@@ -148,13 +148,13 @@
     const repos = data ? data.repos : [];
     if (!repos.length) return null;
     const spec = [
-      ['commits_observed', '2 fictional commits observed'],
+      ['commits_observed', '2 commits observed'],
       ['release_published', 'v9.9.9-demo published'],
-      ['fork_activity_observed', 'fictional fork activity'],
-      ['collection_stale', 'fictional refresh failure'],
+      ['fork_activity_observed', 'fork activity'],
+      ['collection_stale', 'refresh failure'],
     ][i % 4];
     const t = new Date(now()).toISOString();
-    return { id: 'd' + ++demoSeq, type: spec[0], repo_id: repos[(i * 3 + demoSeq) % repos.length].id, source_at: t, observed_at: t, sample: true, summary: '[DEMO] ' + spec[1] };
+    return { id: 'd' + ++demoSeq, type: spec[0], repo_id: repos[(i * 3 + demoSeq) % repos.length].id, source_at: t, observed_at: t, sample: true, summary: '[DEMO] fictional, not real activity of this repository: ' + spec[1] };
   }
 
   function stopDemo() {
@@ -279,9 +279,9 @@
     add('h2', 'Disclaimer');
     add('p', 'ps3rc-feed is an automated, unofficial index. Project discovery, game associations, toolkit detection and repository descriptions may be incorrect or outdated. Entries do not verify authorship, endorsement, safety, playability or completion. Activity and timestamps reflect collected GitHub data. Follow source links to evaluate each project.');
     add('h2', 'This build');
-    add('p', 'SAMPLE DATA. Every name, number and date is fictional and uses example, demo or sample repositories. Sample entries carry no links: names are fictional and `open` prints "sample entry: no real link".');
+    add('p', 'Public GitHub repositories that match PS3 recompilation searches, plus the forks of one root repository. The data comes from three read-only collection runs on 2026-11-10 (UTC) and was published by hand. The last run was incomplete: some repositories could not be fully collected, so entries and numbers may be missing. Game, category and toolkit labels are inferred from names and descriptions and may be wrong. This site hosts no game files.');
     add('h2', 'What "live" means');
-    add('p', 'The page polls a small manifest every 60 seconds (paused in hidden tabs, with backoff on failure) and loads the feed only when its version changes. Delay includes collection, build, caching and polling. It is not real-time.');
+    add('p', 'Nothing here is real time. The feed changes only when a new export is published by hand. The page checks a small manifest every 60 seconds (paused in hidden tabs, with backoff on failure) and reloads the feed only when its version changes. Event times are GitHub source times, or collection times when GitHub gives none.');
     add('h2', 'Status values');
     add('p', 'Statuses describe observed activity only: active (activity in the last 30 days), quiet (older), stale (collection is failing), archived. They say nothing about whether a project works. unknown means missing, never zero.');
     add('h2', 'Fork and game labels');
@@ -302,7 +302,7 @@
     if (state.view === 'about') {
       box.append(aboutView());
     } else if (!data) {
-      box.append(el('p', 'empty', 'loading...'));
+      box.append(el('p', 'empty', failures ? 'The feed could not be loaded, so nothing is shown. Connection: ' + conn + '.' : 'loading...'));
     } else if (!shown.length) {
       box.append(el('p', 'empty', all.length ? 'No rows match the current filters.' : 'Nothing here yet.'));
     } else if (state.view === 'feed') {
@@ -530,7 +530,7 @@
       if (document.hidden) clearTimeout(timer);
       else poll();
     });
-    print({ text: 'ps3rc-feed design preview, SAMPLE DATA. Type help. Press / to focus the prompt.' }, 'dim');
+    print({ text: 'ps3rc-feed: unofficial index of public GitHub repositories, collected 2026-11-10 UTC, published by hand. Type help or about. Press / to focus the prompt.' }, 'dim');
     poll();
   }
 

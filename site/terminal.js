@@ -54,7 +54,7 @@
     scroll: ['scroll auto|manual', 'auto follows the newest edge; manual never moves your view'],
     view: ['view feed|table|forks|about', 'also: feed, table, forks, about as commands'],
     subscribe: ['subscribe', 'print the proposed RSS routes'],
-    demo: ['demo [n|stop]', 'insert fictional demo events one by one'],
+    demo: ['demo [n|stop]', 'insert fictional demo events one by one (not real activity)'],
     status: ['status', 'feed freshness and current settings'],
     about: ['about', 'full disclaimer'],
     clear: ['clear', 'clear the output (Ctrl+L)'],
@@ -533,7 +533,7 @@
       const n = a ? Number(a) : 4;
       if (!Number.isInteger(n) || n < 1 || n > 10) return o.push(err('usage: demo [1-10|stop]'));
       fx.push({ type: 'demo', n });
-      o.push('DEMO MODE: inserting ' + n + ' fictional events, one every 1.5 s. They are not real activity.');
+      o.push('DEMO MODE: inserting ' + n + ' fictional events, one every 1.5 s, on repositories taken from the real feed. They are not real activity: those repositories did not do this. reset removes them.');
     },
     status(s, args, ctx, o) {
       (ctx.info || []).forEach((l) => o.push(l));

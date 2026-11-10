@@ -2,15 +2,19 @@
 
 Static page for ps3rc-feed, an automated and unofficial activity feed of PS3 recompilation projects on GitHub.
 
-Status: design preview with sample data. Every name, number and date in `data/` is fictional. The sample data has no links: sample entries are flagged `sample: true`, carry no URL, and `open` / `show` print "sample entry: no real link". Real (non-sample) entries still go through the https://github.com check. Nothing here is deployed, and the RSS routes it prints are proposed only.
+Status: `data/` holds the first real feed, exported with `python3 -m collector export` from three read-only collection runs on 2026-11-10 (UTC) and published by hand; it is not real time. It indexes public GitHub repositories that match PS3 recompilation searches and the forks of one root repository. The last run was incomplete, so some repositories could not be fully collected. A listing does not mean a project is playable, official, safe or endorsed. Game, category and toolkit labels are inferred and may be wrong. No game files are hosted. Links go through the https://github.com check. The RSS routes it prints are proposed only.
 
-Open `index.html` directly (file://) or serve the folder from any static host. No build step, no external requests. When `fetch` is unavailable (file://) the page falls back to `data/feed-fallback.js`, which must equal `data/feed.json`; regenerate it with:
+Serve the folder from any static host (no build step, no external requests). Over file:// `fetch` is unavailable, and `data/feed-fallback.js` is `window.PS3RC_FALLBACK = null;`, so the page shows that the feed could not be loaded instead of any data.
 
-    node -e "const f=require('fs');f.writeFileSync('data/feed-fallback.js','window.PS3RC_FALLBACK = '+JSON.stringify(JSON.parse(f.readFileSync('data/feed.json','utf8')))+';\n')"
+`testdata/` holds the fictional sample (every name, number and date is made up; entries are flagged `sample: true` and carry no links). It drives the tests and the browser check and is not deployed. Its `feed-fallback.js` must equal its `feed.json`; regenerate it inside `testdata/` with:
+
+    node -e "const f=require('fs');f.writeFileSync('feed-fallback.js','window.PS3RC_FALLBACK = '+JSON.stringify(JSON.parse(f.readFileSync('feed.json','utf8')))+';\n')"
 
 Tests (Node 20 or newer, no dependencies), run inside this folder:
 
     node --test
+
+Browser check (headless Chromium, local only): `sh tools/browser_check.sh`. It serves two temporary copies of this folder on 127.0.0.1, one with `testdata/` copied into `data/` (sample) and one as is (real feed), and also opens the real copy over file:// to check the failed-load state. Screenshots go to `shots/` (ignored by git).
 
 Type `help` at the prompt for the commands.
 
