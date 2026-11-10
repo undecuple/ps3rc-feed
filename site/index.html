@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="description" content="Design preview of ps3rc-feed, an automated unofficial activity feed of PS3 recompilation projects. Sample data only.">
+<title>ps3rc-feed</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#view">Skip to the feed</a>
+<main class="term">
+  <header class="titlebar">
+    <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <h1>ps3rc-feed :: automated PS3 recomp activity</h1>
+  </header>
+
+  <section class="notice" aria-label="Notices">
+    <p class="badge"><strong>SAMPLE DATA</strong> Design preview. All names, numbers and dates are fictional (example/... repositories). "Live" means near-live polling of generated JSON, not real-time.</p>
+    <p class="disclaimer">Automated, unofficial index. Associations, toolkit detection and activity may be wrong or out of date. A listing does not mean a project is playable, official, safe or endorsed.</p>
+    <p id="statusline" class="statusline">loading...</p>
+  </section>
+
+  <nav class="bar" aria-label="Views and controls">
+    <div class="group" id="views" role="group" aria-label="Views"></div>
+    <div class="group" id="toggles" role="group" aria-label="Controls"></div>
+  </nav>
+  <details id="quick" class="quick">
+    <summary>Quick filters and sort</summary>
+    <div class="bar">
+      <div class="group" id="filter-chips" role="group" aria-label="Quick filters"></div>
+      <div class="group" id="sort-chips" role="group" aria-label="Quick sort"></div>
+    </div>
+  </details>
+
+  <div class="activeline">
+    <p id="active"></p>
+    <button type="button" id="clear-filters" class="chip">clear</button>
+  </div>
+  <div class="newline">
+    <p id="newcount" aria-live="polite" aria-atomic="true"></p>
+    <button type="button" id="jump" class="chip" hidden>jump to newest</button>
+  </div>
+
+  <div id="view" class="view" tabindex="0" role="region" aria-label="Feed"></div>
+  <div id="out" class="out" tabindex="0" role="region" aria-label="Command output"></div>
+
+  <div class="prompt">
+    <label for="cmd"><span class="sign" aria-hidden="true">$</span><span class="sr">command</span></label>
+    <input id="cmd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="search games, repos, owners (or type help)">
+  </div>
+</main>
+<script src="data/feed-fallback.js"></script>
+<script src="terminal.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
