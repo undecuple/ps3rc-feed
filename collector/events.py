@@ -37,7 +37,7 @@ the review findings):
 
 import copy
 
-from . import model, schema, text
+from . import forks, model, schema, text
 from .store import get_observation, put_observation
 
 
@@ -61,7 +61,7 @@ def _commit_word(n):
 
 
 def _new_observation(repo, run_at, sources):
-    category, game, toolkit = text.classify(repo["full_name"], repo["description"], repo["readme_excerpt"])
+    # Category, game and toolkit are filled by the association post-pass.
     return {
         "repository_id": repo["repository_id"],
         "full_name": repo["full_name"],
@@ -93,9 +93,13 @@ def _new_observation(repo, run_at, sources):
         "history_rewrite_suspected": False,
         "observed_commits": {},
         "releases": {},
-        "category": category,
-        "game": game,
-        "toolkit": toolkit,
+        "category": "unclassified",
+        "game": forks.unknown_game(),
+        "toolkit": forks.unknown_toolkit(),
+        "ancestry_state": "unknown",
+        "discovery_roots": [],
+        "discovery_queries": [],
+        "comparison": forks.empty_comparison(),
     }
 
 
@@ -163,20 +167,44 @@ def _record_releases(obs, repo, run_at):
     return new
 
 
-def _commits_event(obs, run_at, new_shas, rewrite, uncertain, future_dated):
+def _shared_shas(repositories, rid, shas):
+    """SHAs among `shas` that another tracked repository has also observed."""
+    shared = set()
+    for other_key, other in repositories.items():
+        if other_key == str(rid):
+            continue
+        observed = other["observed_commits"]
+        for sha in shas:
+            if sha in observed:
+                shared.add(sha)
+    return sorted(shared)
+
+
+def _commits_event(repositories, obs, run_at, new_shas, rewrite, uncertain, future_dated):
+    """One grouped event for a repository's unseen SHAs.
+
+    Observations stay per repository: a SHA shared with another repository
+    in the fork network is still recorded and reported here. When a fork's
+    new SHAs are all already known from other repositories, the event is a
+    fork_activity_observed (inherited activity); otherwise commits_observed.
+    """
     source_at = max(obs["observed_commits"][s]["committed_at"] for s in new_shas)
     if source_at > run_at:
         source_at = run_at
     exact = obs["commits_complete"] is True and not rewrite and not uncertain
     n = len(new_shas)
+    shared = _shared_shas(repositories, obs["repository_id"], new_shas)
+    inherited = bool(obs["is_fork"]) and len(shared) == n
+    event_type = model.FORK_ACTIVITY_OBSERVED if inherited else model.COMMITS_OBSERVED
+    where = "tracked branch (all already observed elsewhere in the network)" if inherited else "default-branch"
     if rewrite:
-        summary = "default-branch commits observed after a possible history rewrite; exact delta unknown"
+        summary = "%s commits observed after a possible history rewrite; exact delta unknown" % where
         count = None
     elif exact:
-        summary = "%d previously unseen default-branch %s" % (n, _commit_word(n))
+        summary = "%d previously unseen %s %s" % (n, where, _commit_word(n))
         count = n
     else:
-        summary = "at least %d previously unseen default-branch %s (collection incomplete)" % (n, _commit_word(n))
+        summary = "at least %d previously unseen %s %s (collection incomplete)" % (n, where, _commit_word(n))
         count = n
     listed = new_shas[: model.MAX_EVENT_SHAS]
     details = {
@@ -187,16 +215,55 @@ def _commits_event(obs, run_at, new_shas, rewrite, uncertain, future_dated):
         "complete": exact,
         "history_rewrite_suspected": rewrite,
         "future_dated": future_dated,
+        "is_fork": obs["is_fork"],
+        "shared_with_network_count": len(shared),
+        "shared_shas": shared[: model.MAX_EVENT_SHAS],
         "commit_urls": [text.commit_url(obs["full_name"], s) for s in listed],
     }
     return model.make_event(
-        model.COMMITS_OBSERVED,
+        event_type,
         obs,
         run_at,
         source_at,
         summary,
         details,
         model.commits_event_id(obs["repository_id"], new_shas),
+    )
+
+
+def _merge_comparison(obs, repo, run_at, emitted):
+    """Store the reported comparison; announce a change between two known snapshots."""
+    if repo.get("comparison") is None:
+        return
+    previous = obs["comparison"]
+    current = forks.normalise_comparison(repo["comparison"])
+    obs["comparison"] = current
+    if not forks.divergence_changed(previous, current):
+        return
+    details = {
+        "ahead": current["ahead"],
+        "behind": current["behind"],
+        "previous_ahead": previous["ahead"],
+        "previous_behind": previous["behind"],
+        "state": current["state"],
+        "base_repository_id": current["base_repository_id"],
+        "base_ref": text.escape_text(current["base_ref"], 128),
+        "head_ref": text.escape_text(current["head_ref"], 128),
+        "base_sha": current["base_sha"],
+        "head_sha": current["head_sha"],
+        "collected_at": current["collected_at"],
+    }
+    emitted.append(
+        model.make_event(
+            model.FORK_DIVERGENCE_CHANGED,
+            obs,
+            run_at,
+            min(current["collected_at"], run_at),
+            "ahead %d / behind %d against the recorded base ref%s"
+            % (current["ahead"], current["behind"], "" if current["state"] == "complete" else " (partial comparison)"),
+            details,
+            model.transition_event_id(obs["repository_id"], "divergence", run_at),
+        )
     )
 
 
@@ -251,13 +318,11 @@ def _merge_ancestry(obs, repo):
     return partial
 
 
-def _apply_success(obs, repo, run_at, config, emitted):
+def _apply_success(repositories, obs, repo, run_at, config, emitted):
     """Update an observation from a fetch with state ok; append events."""
     was_notified = obs["stale_notified"]
     failures_before = obs["consecutive_failures"]
     prev_archived = obs["archived"]
-    prev_game_key = obs["game"]["key"]
-    prev_title = obs["game"]["title"]
 
     if repo["full_name"] != obs["full_name"] or repo["owner"] != obs["owner"]:
         obs["name_history"].append({"full_name": obs["full_name"], "owner": obs["owner"], "until": run_at})
@@ -283,11 +348,6 @@ def _apply_success(obs, repo, run_at, config, emitted):
         obs["collection_state"] = "partial" if partial else "ok"
     elif obs["collection_state"] == "ok":
         obs["collection_state"] = "partial"
-
-    category, game, toolkit = text.classify(obs["full_name"], obs["description"], obs["readme_excerpt"])
-    obs["category"] = category
-    obs["toolkit"] = toolkit
-    obs["game"] = game
 
     new_shas = []
     rewrite = uncertain = future_dated = False
@@ -321,9 +381,10 @@ def _apply_success(obs, repo, run_at, config, emitted):
         )
 
     if new_shas:
-        emitted.append(_commits_event(obs, run_at, new_shas, rewrite, uncertain, future_dated))
+        emitted.append(_commits_event(repositories, obs, run_at, new_shas, rewrite, uncertain, future_dated))
     for rel in new_releases:
         emitted.append(_release_event(obs, run_at, rel))
+    _merge_comparison(obs, repo, run_at, emitted)
 
     if prev_archived is False and obs["archived"] is True:
         emitted.append(
@@ -338,28 +399,38 @@ def _apply_success(obs, repo, run_at, config, emitted):
             )
         )
 
-    if obs["game"]["key"] != prev_game_key:
-        details = {
-            "previous_key": prev_game_key,
-            "new_key": obs["game"]["key"],
-            "previous_title": text.escape_text(prev_title, text.MAX_TITLE),
-            "new_title": text.escape_text(obs["game"]["title"], text.MAX_TITLE),
-            "basis": obs["game"]["basis"],
-            "confidence": obs["game"]["confidence"],
-            "inferred": True,
-            "verified": False,
-        }
-        emitted.append(
-            model.make_event(
-                model.GAME_ASSOCIATION_CHANGED,
-                obs,
-                run_at,
-                None,
-                "inferred game association changed (automated, unverified)",
-                details,
-                model.transition_event_id(obs["repository_id"], "game_association", run_at),
-            )
-        )
+
+
+def _game_change_event(obs, previous, run_at):
+    """game_association_changed after the association post-pass moved a repository's key."""
+    basis = obs["game"]["basis"]
+    if basis == "inherited_from_parent":
+        summary = "inferred game now inherited from parent (automated, unverified)"
+    elif basis is None:
+        summary = "inferred game association removed (automated, unverified)"
+    else:
+        summary = "inferred game association changed (automated, unverified)"
+    details = {
+        "previous_key": previous["key"],
+        "new_key": obs["game"]["key"],
+        "previous_title": text.escape_text(previous["title"], text.MAX_TITLE),
+        "new_title": text.escape_text(obs["game"]["title"], text.MAX_TITLE),
+        "previous_basis": previous["basis"],
+        "basis": basis,
+        "inherited_from": obs["game"]["inherited_from"],
+        "confidence": obs["game"]["confidence"],
+        "inferred": True,
+        "verified": False,
+    }
+    return model.make_event(
+        model.GAME_ASSOCIATION_CHANGED,
+        obs,
+        run_at,
+        None,
+        summary,
+        details,
+        model.transition_event_id(obs["repository_id"], "game_association", run_at),
+    )
 
 
 def _apply_failure(obs, repo, run_at, config, emitted):
@@ -397,18 +468,36 @@ def _apply_failure(obs, repo, run_at, config, emitted):
         )
 
 
-def _discovery_sources(run, repository_id):
-    sources = []
-    for search in run["searches"]:
-        if repository_id in search["repository_ids"]:
-            sources.append("search:%s" % search["query"])
+def _discovery(run, repository_id):
+    """(queries, roots, sources) through which this run named the repository.
+
+    A repository is "found through the fork network" of a root when that
+    root's scan lists it; a root is also a source for itself.
+    """
+    queries = sorted(s["query"] for s in run["searches"] if repository_id in s["repository_ids"])
+    roots = sorted(
+        r["repository_id"]
+        for r in run["roots"]
+        if repository_id in (r.get("found_repository_ids") or []) or r["repository_id"] == repository_id
+    )
+    sources = ["search:%s" % q for q in queries]
     for root in run["roots"]:
         if root["repository_id"] == repository_id:
             sources.append("root:%d" % root["repository_id"])
-    return sorted(sources)
+        elif repository_id in (root.get("found_repository_ids") or []):
+            sources.append("fork_network:%d" % root["repository_id"])
+    return queries, roots, sorted(sources)
+
+
+def _merge_discovery(obs, run):
+    queries, roots, sources = _discovery(run, obs["repository_id"])
+    obs["discovery_queries"] = sorted(set(obs["discovery_queries"]) | set(queries))[: schema.MAX_SOURCES]
+    obs["discovery_roots"] = sorted(set(obs["discovery_roots"]) | set(roots))[: schema.MAX_SOURCES]
+    obs["discovery_sources"] = sorted(set(obs["discovery_sources"]) | set(sources))[: schema.MAX_SOURCES]
 
 
 def _record_collection(state, run):
+    """Search and root-scan status. A partial scan keeps what earlier scans found and its cursor."""
     from . import catalog
 
     col = state["collection"]
@@ -420,17 +509,32 @@ def _record_collection(state, run):
             "last_run_at": run_at,
         }
     for root in run["roots"]:
-        col["roots"][str(root["repository_id"])] = {
+        key = str(root["repository_id"])
+        previous = col["roots"].get(key)
+        found = set(root.get("found_repository_ids") or [])
+        if previous is not None:
+            found |= set(previous["found_repository_ids"])
+        complete = root["forks_scan_complete"]
+        col["roots"][key] = {
             "full_name": root["full_name"],
-            "forks_scan_complete": root["forks_scan_complete"],
-            # Fork-network listing of the root; recorded only, step 2 uses it.
-            "found_repository_ids": sorted(set(root.get("found_repository_ids") or [])),
+            "forks_scan_complete": complete,
+            "found_repository_ids": sorted(found)[: schema.MAX_IDS],
+            "scan_state": "complete" if complete else "partial",
+            "resume_cursor": None if complete else root.get("resume_cursor"),
+            "last_complete_at": run_at if complete else (previous["last_complete_at"] if previous else None),
             "last_run_at": run_at,
         }
     searches, roots = catalog.incomplete_work(col)
     col["incomplete_searches"] = searches
     col["incomplete_roots"] = roots
     col["incomplete"] = bool(searches or roots)
+    named = set()
+    for search in col["searches"].values():
+        named.update(search["repository_ids"])
+    for key, root in col["roots"].items():
+        named.add(int(key))
+        named.update(root["found_repository_ids"])
+    col["pending_repository_ids"] = sorted(i for i in named if str(i) not in state["repositories"])[: schema.MAX_IDS]
 
 
 def _discovered_event(obs, run_at):
@@ -443,6 +547,8 @@ def _discovered_event(obs, run_at):
         "commits_in_baseline": len(obs["observed_commits"]),
         "releases_in_baseline": len(obs["releases"]),
     }
+    details["discovery_roots"] = list(obs["discovery_roots"])
+    details["discovery_queries"] = [text.escape_text(q) for q in obs["discovery_queries"]]
     source = obs["discovery_sources"][0] if obs["discovery_sources"] else "collector"
     return model.make_event(
         model.REPOSITORY_DISCOVERED,
@@ -452,6 +558,37 @@ def _discovered_event(obs, run_at):
         "first seen via %s" % text.escape_text(source, 120),
         details,
         model.discovered_event_id(obs["repository_id"]),
+    )
+
+
+def _fork_discovered_event(repositories, obs, run_at):
+    parent = repositories.get(str(obs["parent_repository_id"])) if obs["parent_repository_id"] is not None else None
+    root = repositories.get(str(obs["network_root_repository_id"])) if obs["network_root_repository_id"] is not None else None
+    if obs["ancestry_state"] == "resolved" and parent is not None:
+        summary = "fork of %s first seen" % parent["full_name"]
+    elif obs["ancestry_state"] == "resolved":
+        summary = "fork first seen; parent repository %d not tracked" % obs["parent_repository_id"]
+    else:
+        summary = "fork first seen; parent not resolved (%s)" % obs["ancestry_state"]
+    details = {
+        "parent_repository_id": obs["parent_repository_id"],
+        "parent": parent["full_name"] if parent else None,
+        "network_root_repository_id": obs["network_root_repository_id"],
+        "root": root["full_name"] if root else None,
+        "ancestry_state": obs["ancestry_state"],
+        "discovery_roots": list(obs["discovery_roots"]),
+        "game_basis": obs["game"]["basis"],
+        "inherited_from": obs["game"]["inherited_from"],
+        "verified": False,
+    }
+    return model.make_event(
+        model.FORK_DISCOVERED,
+        obs,
+        run_at,
+        None,
+        summary,
+        details,
+        model.fork_discovered_event_id(obs["repository_id"]),
     )
 
 
@@ -468,32 +605,45 @@ def _apply(state, run, config):
         state["baseline_done"] = True
         state["baseline_at"] = run_at
 
+    repositories = state["repositories"]
+    previous_games = {rid: dict(obs["game"]) for rid, obs in repositories.items()}
+    new_ids = []
     for repo in sorted(run["repositories"], key=lambda r: r["repository_id"]):
         rid = repo["repository_id"]
         obs = get_observation(state, rid)
         is_new = obs is None
         if is_new:
-            obs = _new_observation(repo, run_at, _discovery_sources(run, rid))
+            obs = _new_observation(repo, run_at, [])
             put_observation(state, obs)
+            new_ids.append(rid)
         obs["last_attempted_refresh_at"] = run_at
-        merged = set(obs["discovery_sources"]) | set(_discovery_sources(run, rid))
-        obs["discovery_sources"] = sorted(merged)[: schema.MAX_SOURCES]
+        _merge_discovery(obs, run)
 
         if repo["fetch_state"] == "ok":
-            _apply_success(obs, repo, run_at, config, emitted)
+            _apply_success(repositories, obs, repo, run_at, config, emitted)
         else:
             _apply_failure(obs, repo, run_at, config, emitted)
 
-        if is_new:
-            # The repository's own history is its baseline; only announce it.
-            emitted[:] = [e for e in emitted if e["repository_id"] != rid]
-            if not baseline_run:
-                emitted.append(_discovered_event(obs, run_at))
+    # Ancestry state, inferred game and toolkit for every observation, with
+    # inheritance from tracked ancestors (bounded walk, loops detected).
+    forks.resolve_associations(repositories)
+
+    new_set = set(new_ids)
+    # A new repository's own history is its baseline: only announce it.
+    emitted = [e for e in emitted if e["repository_id"] not in new_set]
+    if not baseline_run:
+        for rid in new_ids:
+            obs = repositories[str(rid)]
+            emitted.append(_discovered_event(obs, run_at))
+            if obs["is_fork"]:
+                emitted.append(_fork_discovered_event(repositories, obs, run_at))
+        for rid, previous in previous_games.items():
+            obs = repositories[rid]
+            if obs["game"]["key"] != previous["key"]:
+                emitted.append(_game_change_event(obs, previous, run_at))
 
     _record_collection(state, run)
     state["last_run_at"] = run_at
-    # On the baseline run every repository is new, so the loop above has
-    # already dropped all of their events and skipped the discovery ones.
     emitted.sort(key=lambda e: (e["repository_id"], e["type"], e["event_id"]))
     return emitted
 

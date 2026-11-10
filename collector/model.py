@@ -21,8 +21,14 @@ REPOSITORY_ARCHIVED = "repository_archived"
 COLLECTION_STALE = "collection_stale"
 COLLECTION_RECOVERED = "collection_recovered"
 GAME_ASSOCIATION_CHANGED = "game_association_changed"
+FORK_DISCOVERED = "fork_discovered"
+FORK_ACTIVITY_OBSERVED = "fork_activity_observed"
+FORK_DIVERGENCE_CHANGED = "fork_divergence_changed"
 
 LABELS = {
+    FORK_DISCOVERED: "FORK",
+    FORK_ACTIVITY_OBSERVED: "FORK-ACTIVITY",
+    FORK_DIVERGENCE_CHANGED: "DIVERGENCE",
     REPOSITORY_DISCOVERED: "FOUND",
     COMMITS_OBSERVED: "COMMIT",
     RELEASE_PUBLISHED: "RELEASE",
@@ -65,6 +71,10 @@ def release_event_id(repository_id, release_id):
 
 def discovered_event_id(repository_id):
     return "repo-%d:discovered" % repository_id
+
+
+def fork_discovered_event_id(repository_id):
+    return "repo-%d:fork_discovered" % repository_id
 
 
 def timestamp_token(run_at):

@@ -391,9 +391,44 @@ REPOSITORY = Obj(
         # from the full name).
         "rewrite_hint": Text(MAX_TAG),
         "html_url_claimed": Text(MAX_DESCRIPTION),
+        # Comparison against the parent, as the fetch layer reported it.
+        "comparison": None,  # set below once COMPARISON exists
     },
-    optional=("head_sha", "rewrite_hint", "html_url_claimed"),
+    optional=("head_sha", "rewrite_hint", "html_url_claimed", "comparison"),
 )
+
+COMPARISON_STATES = ("complete", "partial", "unavailable", "not_comparable")
+COMPARISON_FIELDS = ("base_repository_id", "base_ref", "head_ref", "base_sha", "head_sha", "ahead", "behind", "collected_at")
+COMPARISON = Obj(
+    {
+        "base_repository_id": Nullable(PositiveId()),
+        "base_ref": Nullable(Text(MAX_TAG)),
+        "head_ref": Nullable(Text(MAX_TAG)),
+        "base_sha": Nullable(SHA),
+        "head_sha": Nullable(SHA),
+        "ahead": Nullable(NonNegInt()),
+        "behind": Nullable(NonNegInt()),
+        "state": Enum(COMPARISON_STATES),
+        "collected_at": Nullable(TIMESTAMP),
+    },
+    optional=COMPARISON_FIELDS,
+)
+REPOSITORY.fields["comparison"] = Nullable(COMPARISON)
+
+
+def check_comparison(comparison, path):
+    """Unknown divergence is null with an unavailable state; a known one has both counts."""
+    for field in COMPARISON_FIELDS:
+        comparison.setdefault(field, None)
+    if comparison["state"] in ("unavailable", "not_comparable"):
+        if comparison["ahead"] is not None or comparison["behind"] is not None:
+            raise SchemaError("%s: ahead/behind must be null when the comparison is %s" % (path, comparison["state"]))
+    else:
+        if comparison["ahead"] is None or comparison["behind"] is None:
+            raise SchemaError("%s: a %s comparison needs ahead and behind" % (path, comparison["state"]))
+        if comparison["collected_at"] is None:
+            raise SchemaError("%s: a %s comparison needs collected_at" % (path, comparison["state"]))
+    return comparison
 
 ROOT = Obj(
     {
@@ -401,8 +436,10 @@ ROOT = Obj(
         "full_name": FULL_NAME,
         "forks_scan_complete": Bool(),
         "found_repository_ids": List(PositiveId(), MAX_IDS),
+        # Opaque position to resume an incomplete fork-network scan from.
+        "resume_cursor": Nullable(Text(MAX_TAG)),
     },
-    optional=("found_repository_ids",),
+    optional=("found_repository_ids", "resume_cursor"),
 )
 SEARCH = Obj({"query": QUERY, "complete": Bool(), "repository_ids": List(PositiveId(), MAX_IDS)})
 
@@ -440,9 +477,14 @@ def validate_run(run):
             ids = [r["id"] for r in repo["releases"]]
             if len(set(ids)) != len(ids):
                 raise SchemaError("run.repositories[%d]: duplicate release id" % i)
+        if repo.get("comparison") is not None:
+            check_comparison(repo["comparison"], "run.repositories[%d].comparison" % i)
     queries = [s["query"] for s in run["searches"]]
     if len(set(queries)) != len(queries):
         raise SchemaError("run.searches: duplicate query")
+    root_ids = [r["repository_id"] for r in run["roots"]]
+    if len(set(root_ids)) != len(root_ids):
+        raise SchemaError("run.roots: duplicate repository_id")
     return run
 
 
@@ -460,6 +502,9 @@ EVENT_TYPES = (
     "collection_stale",
     "collection_recovered",
     "game_association_changed",
+    "fork_discovered",
+    "fork_activity_observed",
+    "fork_divergence_changed",
 )
 
 EVENT = Obj(
@@ -514,13 +559,22 @@ GAME = Obj(
     {
         "key": Nullable(Str(pattern=re.compile(r"[a-z0-9-]+\Z"), max_len=64)),
         "title": Nullable(Text(MAX_TAG)),
-        "basis": Nullable(Str(pattern=KEY_RE, max_len=64)),
+        "basis": Nullable(Enum(("readme_title", "inherited_from_parent"))),
         "confidence": Enum(("strong", "weak", "unknown")),
         "inferred": Bool(),
         "verified": Bool(),
+        "inherited_from": Nullable(PositiveId()),
     }
 )
-TOOLKIT = Obj({"name": Nullable(Str(pattern=LABEL_RE, max_len=64)), "confidence": Enum(("strong", "weak", "unknown"))})
+TOOLKIT = Obj(
+    {
+        "name": Nullable(Str(pattern=LABEL_RE, max_len=64)),
+        "confidence": Enum(("strong", "weak", "unknown")),
+        "basis": Nullable(Enum(("own_text", "inherited_from_parent"))),
+        "inherited_from": Nullable(PositiveId()),
+    }
+)
+ANCESTRY_STATE = Enum(("none", "resolved", "unresolved", "unknown", "inconsistent"))
 
 OBSERVATION = Obj(
     {
@@ -557,6 +611,10 @@ OBSERVATION = Obj(
         "category": Enum(("framework", "game", "unclassified")),
         "game": GAME,
         "toolkit": TOOLKIT,
+        "ancestry_state": ANCESTRY_STATE,
+        "discovery_roots": List(PositiveId(), MAX_SOURCES),
+        "discovery_queries": List(QUERY, MAX_SOURCES),
+        "comparison": COMPARISON,
     }
 )
 
@@ -566,6 +624,9 @@ ROOT_STATUS = Obj(
         "full_name": FULL_NAME,
         "forks_scan_complete": Bool(),
         "found_repository_ids": List(PositiveId(), MAX_IDS),
+        "scan_state": Enum(("complete", "partial")),
+        "resume_cursor": Nullable(Text(MAX_TAG)),
+        "last_complete_at": Nullable(TIMESTAMP),
         "last_run_at": TIMESTAMP,
     }
 )
@@ -577,6 +638,8 @@ COLLECTION = Obj(
         "incomplete": Bool(),
         "incomplete_searches": List(QUERY, MAX_IDS),
         "incomplete_roots": List(PositiveId(), MAX_IDS),
+        # Ids named by a search or a fork-network scan that have no observation yet.
+        "pending_repository_ids": List(PositiveId(), MAX_IDS),
     }
 )
 
@@ -602,6 +665,9 @@ def validate_state(state):
             raise SchemaError("state.repositories[%r]: owner does not match full_name" % key)
         if obs["tip_sha"] is not None and obs["tip_sha"] not in obs["observed_commits"]:
             raise SchemaError("state.repositories[%r]: tip_sha is not an observed commit" % key)
+        check_comparison(obs["comparison"], "state.repositories[%r].comparison" % key)
+        if (obs["game"]["basis"] == "inherited_from_parent") != (obs["game"]["inherited_from"] is not None):
+            raise SchemaError("state.repositories[%r].game: inherited_from and basis disagree" % key)
     seen = set()
     for i, event in enumerate(state["events"]):
         validate_event(event)

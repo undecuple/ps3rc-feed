@@ -23,6 +23,7 @@ def empty_state():
             "incomplete": False,
             "incomplete_searches": [],
             "incomplete_roots": [],
+            "pending_repository_ids": [],
         },
     }
 
