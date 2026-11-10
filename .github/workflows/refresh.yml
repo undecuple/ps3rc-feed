@@ -1,0 +1,235 @@
+name: refresh
+
+# Collects a new run every 6 hours, keeps the export state on the feed-state branch and deploys the page.
+# Nothing runs unless the repository variable REFRESH_ENABLED is 'true'.
+#
+# Request budget: one run makes at most 800 collector requests (--max-requests 800, also the config's
+# max_requests) plus 1 smoke request, so at most 801 requests. Four runs a day are at most 3,204 requests a
+# day. Scheduled runs are 6 hours apart and never overlap (concurrency below), so one hour holds at most one
+# of them, under the built-in token's 1,000 requests an hour. A run started by hand adds up to 801 more; the
+# collector stops on a rate limit.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: vars.REFRESH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.export.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Look for the feed-state branch
+        id: state
+        run: |
+          # Exit 2 means the branch does not exist; any other failure stops the job,
+          # so a network error is never mistaken for a first run.
+          rc=0
+          git ls-remote --exit-code --heads origin refs/heads/feed-state > /dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "feed-state branch found"
+          elif [ "$rc" -eq 2 ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "no feed-state branch: this is a first run"
+          else
+            echo "could not list the remote branches (exit $rc)"
+            exit 1
+          fi
+      - if: steps.state.outputs.exists == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feed-state
+          path: feed-state
+          persist-credentials: false
+      - name: Restore the saved state
+        if: steps.state.outputs.exists == 'true'
+        run: |
+          if [ ! -f feed-state/state.json ] || [ -L feed-state/state.json ]; then
+            echo "the feed-state branch has no state.json; stopping instead of starting a new baseline"
+            exit 1
+          fi
+          mkdir -p data
+          cp feed-state/state.json data/state.json
+      - name: Smoke check code search
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # One request. Prints only the HTTP status and a word; the body goes to /dev/null.
+          code=$(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" | curl -s -o /dev/null -w '%{http_code}' \
+            --max-time 30 -H 'Accept: application/vnd.github+json' -H @- \
+            'https://api.github.com/search/code?q=filename%3Aps3recomp-LICENSE.txt&per_page=1') || code=000
+          case "$code" in
+            200) word="ok" ;;
+            401|403) word="auth error" ;;
+            422) word="validation error" ;;
+            429) word="rate limited" ;;
+            *) word="other" ;;
+          esac
+          echo "code search smoke: $code $word"
+          exit 0
+      - name: Collect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATE_EXISTS: ${{ steps.state.outputs.exists }}
+        run: |
+          mkdir -p data
+          previous=()
+          if [ "$STATE_EXISTS" = "true" ]; then
+            previous=(--previous-state data/state.json)
+          fi
+          rc=0
+          python3 -B -m collector collect --config config/sources.json --live \
+            --max-requests 800 --out data/run.json "${previous[@]}" || rc=$?
+          case "$rc" in
+            0) echo "collection complete" ;;
+            3) echo "collection partial; the feed says so" ;;
+            *) echo "collection failed (exit $rc)"; exit 1 ;;
+          esac
+      - name: Export
+        id: export
+        env:
+          STATE_EXISTS: ${{ steps.state.outputs.exists }}
+        run: |
+          if [ "$STATE_EXISTS" = "true" ]; then
+            python3 -B -m collector export --runs data/run.json --out-dir data/site --overwrite \
+              --state-in data/state.json --state-out data/state.json --stale-after-minutes 1500
+          else
+            # First run: no saved state, so the run is applied to an empty store (a baseline).
+            python3 -B -m collector export --runs data/run.json --out-dir data/site \
+              --state-out data/state.json --stale-after-minutes 1500
+          fi
+          version=$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' data/site/manifest.json)
+          case "$version" in
+            *[!0-9a-f]*|"") echo "manifest version is not hex"; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p data/artifact
+          cp data/state.json data/site/feed.json data/site/manifest.json data/artifact/
+      # The run file stays on the runner. The artifact holds state.json, feed.json and manifest.json for one day.
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          name: feed-data
+          path: data/artifact
+          retention-days: 1
+
+  publish-state:
+    needs: collect
+    if: vars.REFRESH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Push state to the feed-state branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECT_VERSION: ${{ needs.collect.outputs.version }}
+        run: |
+          work="$RUNNER_TEMP/feed-state"
+          mkdir -p "$work/artifact" "$work/branch" "$work/check"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name feed-data --dir "$work/artifact"
+          tar -xf "$work/artifact/artifact.tar" -C "$work/branch"
+          if [ ! -f "$work/branch/state.json" ] || [ -L "$work/branch/state.json" ]; then
+            echo "the artifact has no state.json"
+            exit 1
+          fi
+          # The same check the deploy uses: feed.json must match the manifest version from the collect job.
+          python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" \
+            "$work/branch" "$work/check"
+          cat > "$work/branch/README.md" <<'EOF'
+          # feed-state
+
+          Written by the refresh workflow. It holds the export state and the newest feed.json and manifest.json.
+          Each refresh replaces this branch with one new commit. Do not edit it by hand.
+          EOF
+          cd "$work/branch"
+          git init -q -b feed-state
+          git add state.json feed.json manifest.json README.md
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898299+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Feed state for run $GITHUB_RUN_ID"
+          # The credential reaches git through environment config, never the remote URL or a command line.
+          basic=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
+          git push -q --force "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-state
+          echo "feed-state updated"
+
+  deploy:
+    # Deploys what publish-state pushed, so the page never shows a feed the saved state does not hold.
+    # A push to feed-state starts no other workflow, so the deployment happens here.
+    needs: [collect, publish-state]
+    if: vars.REFRESH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feed-state
+          path: feed-state
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Run site tests
+        working-directory: site
+        run: node --test
+      - name: Collect served files
+        env:
+          EXPECT_VERSION: ${{ needs.collect.outputs.version }}
+        run: |
+          mkdir out
+          cd site
+          cp index.html style.css terminal.js app.js carpet.svg favicon.svg ../out/
+          cp -r fonts data ../out/
+          cd ..
+          python3 -B .github/scripts/overlay_feed.py --required --expect-version "$EXPECT_VERSION" feed-state out/data
+          cd out
+          find . -type f | sort
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: out
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
