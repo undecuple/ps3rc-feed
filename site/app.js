@@ -207,6 +207,26 @@
     return b;
   }
 
+  // Column headings that can sort: clicking one runs the same `sort` command as the sort chips.
+  const HEAD_SORT = { Time: 'time', Game: 'game', 'Game / inferred title': 'game', 'Game association': 'game', Owner: 'owner', 'Latest commit': 'time', 'Commits 30d': 'commits', Stars: 'stars', Status: 'status' };
+
+  function sortHead(tag, label) {
+    const node = el(tag);
+    const key = HEAD_SORT[label];
+    if (!key) {
+      node.textContent = label;
+      return node;
+    }
+    const on = state.sort.key === key;
+    const b = el('button', 'sorthead', label + (on ? (state.sort.dir === 'asc' ? ' ▲' : ' ▼') : ''));
+    b.type = 'button';
+    b.title = 'Sort by ' + label.toLowerCase();
+    b.addEventListener('click', () => run('sort ' + (on ? (state.sort.dir === 'asc' ? '-' : '') : DESC_FIRST.includes(key) ? '-' : '') + key));
+    if (tag === 'th') node.setAttribute('aria-sort', on ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    node.append(b);
+    return node;
+  }
+
   function feedRow(rec) {
     const li = el('li');
     const b = rowButton(rec, 'row');
@@ -241,7 +261,7 @@
       ? ['Repository', 'Owner', 'Parent', 'Network root', 'Ahead / behind', 'Game association', 'Stars', 'Latest commit']
       : ['Game / inferred title', 'Repository', 'Owner', 'Toolkit', 'Latest commit', 'Commits 30d', 'Stars', 'Fork', 'Status'];
     const tr0 = el('tr');
-    heads.forEach((h) => tr0.append(el('th', null, h)));
+    heads.forEach((h) => tr0.append(sortHead('th', h)));
     const thead = el('thead');
     thead.append(tr0);
     table.append(thead);
@@ -308,8 +328,7 @@
     } else if (state.view === 'feed') {
       const ul = el('ul', 'feed');
       const head = el('li', 'colhead');
-      head.setAttribute('aria-hidden', 'true');
-      ['Time', 'Type', 'Game', 'Repository', 'Summary'].forEach((h) => head.append(el('span', null, h)));
+      ['Time', 'Type', 'Game', 'Repository', 'Summary'].forEach((h) => head.append(sortHead('span', h)));
       ul.append(head);
       for (const g of T.groupRecords(shown, state.group)) {
         if (g.label !== null) ul.append(el('li', 'head', '== ' + state.group + ': ' + g.label + ' (' + g.items.length + ') =='));

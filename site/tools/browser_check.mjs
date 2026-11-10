@@ -214,6 +214,24 @@ for (const [kind, page, search] of runs) {
         check(r.sticky[v].scrolled > 0 && r.sticky[v].visible, name + ': ' + v + ' heading sticks (' + JSON.stringify(r.sticky[v]) + ')');
         if (v === 'forks' || v === 'table') await shot('-sticky-' + v);
       }
+      // clicking a column heading sorts by it; a second click flips the direction
+      await typeLine('view table');
+      const starCol = () => evalJs(`(() => {
+        const ths = [...document.querySelectorAll('#view thead th')];
+        const i = ths.findIndex((t) => /^Stars/.test(t.textContent));
+        const vals = [...document.querySelectorAll('#view tbody tr')].map((tr) => tr.children[i].textContent).filter((v) => /^[0-9]+$/.test(v)).map(Number);
+        return { vals: vals.slice(0, 40), sort: ths[i].getAttribute('aria-sort') };
+      })()`);
+      const clickStars = () => evalJs("[...document.querySelectorAll('#view thead th button')].find((b) => /^Stars/.test(b.textContent)).click()");
+      await clickStars();
+      const first = await starCol();
+      await clickStars();
+      const second = await starCol();
+      const sorted = (v, dir) => v.every((x, i) => i === 0 || (dir === 'desc' ? v[i - 1] >= x : v[i - 1] <= x));
+      r.sortByHeading = { first: first.sort, second: second.sort };
+      check(first.vals.length > 5 && first.sort === 'descending' && sorted(first.vals, 'desc'), name + ': first click on Stars sorts descending ' + JSON.stringify(first));
+      check(second.sort === 'ascending' && sorted(second.vals, 'asc'), name + ': second click on Stars sorts ascending ' + JSON.stringify(second));
+      await typeLine('sort -time');
       await typeLine('view feed');
     }
     if (kind === 'real' && !mobile) {
