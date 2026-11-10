@@ -118,8 +118,9 @@ class L2BudgetStopBeforeRequest(CollectorTestCase):
     def test_never_requested_repository_is_not_written_as_failed(self):
         run, report, client = collect_plain(network(3), DAY_RUN_AT, max_requests=5)
         self.assertEqual(report["stopped"], "budget")
-        self.assertEqual([(r["repository_id"], r["fetch_state"]) for r in run["repositories"]], [(10, "ok")])
-        self.assertEqual(report["not_fetched_repository_ids"], [11, 12])
+        # Newest id first: 12 is fetched, 10 and 11 were never requested.
+        self.assertEqual([(r["repository_id"], r["fetch_state"]) for r in run["repositories"]], [(12, "ok")])
+        self.assertEqual(report["not_fetched_repository_ids"], [10, 11])
         self.assertEqual(run["collection_report"]["not_fetched"], 2)
         self.assertEqual(len(client.log), 5)
 
@@ -139,18 +140,19 @@ class L2BudgetStopBeforeRequest(CollectorTestCase):
         self.assertEqual(boundary["last_attempted_refresh_at"], "2026-11-01T00:00:00Z")
         status = catalog.collection_status(state)
         self.assertEqual(status["failing"], [])
-        self.assertEqual(status["not_refreshed"], [11, 12])
+        self.assertEqual(status["not_refreshed"], [10, 11])
         entries = {c["id"]: c for c in catalog.build_catalog(state)}
         self.assertIs(entries[11]["collection_failing"], False)
         self.assertIs(entries[11]["refreshed_in_last_run"], False)
-        self.assertIs(entries[10]["refreshed_in_last_run"], True)
+        self.assertIs(entries[12]["refreshed_in_last_run"], True)
 
     def test_a_request_that_was_really_refused_keeps_its_failure_state(self):
         routes = network(2)
-        routes["GET /repositories/11"] = {"status": 403, "headers": {"x-ratelimit-remaining": "0"}, "body": {}}
+        # Newest id first: 11 is fetched, then 10's metadata request is refused.
+        routes["GET /repositories/10"] = {"status": 403, "headers": {"x-ratelimit-remaining": "0"}, "body": {}}
         run, report, _ = collect_plain(routes, DAY_RUN_AT)
         self.assertEqual(report["stopped"], "rate_limited")
-        self.assertEqual([(r["repository_id"], r["fetch_state"]) for r in run["repositories"]], [(10, "ok"), (11, "rate_limited")])
+        self.assertEqual([(r["repository_id"], r["fetch_state"]) for r in run["repositories"]], [(10, "rate_limited"), (11, "ok")])
 
 
 class L3PartialRunVisibleInStatus(CollectorTestCase):
@@ -169,10 +171,10 @@ class L3PartialRunVisibleInStatus(CollectorTestCase):
         self.assertIs(status["incomplete"], True)
         self.assertEqual(status["last_run"]["stopped"], "budget")
         self.assertIs(status["last_run"]["complete"], False)
-        # Budget 2: the search and repository 10's metadata; 11 and 12 were never requested.
+        # Budget 2: the search and repository 12's metadata (newest id first); 10 and 11 were never requested.
         self.assertEqual(status["last_run"]["not_fetched_count"], 2)
         self.assertEqual(status["failing"], [])
-        self.assertEqual(status["not_refreshed"], [11, 12])
+        self.assertEqual(status["not_refreshed"], [10, 11])
         self.assertEqual(state["collection"]["last_run"]["last_run_at"], "2026-11-02T00:00:00Z")
         schema.validate_state(copy.deepcopy(state))
         # Fixture runs carry no report: treated as complete.
