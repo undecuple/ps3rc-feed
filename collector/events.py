@@ -607,6 +607,15 @@ def _record_collection(state, run):
         named.update(root["found_repository_ids"])
     col["pending_repository_ids"] = sorted(i for i in named if str(i) not in state["repositories"])[: schema.MAX_IDS]
     col["rejected_fields"] = [dict(r) for r in run.get("rejected_fields", [])][: schema.MAX_REJECTED]
+    # A partial or stopped collection stays visible in the published status.
+    report = run.get("collection_report") or {}
+    col["last_run"] = {
+        "last_run_at": run_at,
+        "complete": bool(report.get("complete", True)),
+        "stopped": report.get("stopped"),
+        "not_fetched": int(report.get("not_fetched", 0)),
+        "error_count": int(report.get("error_count", 0)),
+    }
 
 
 # --- discovery and association events --------------------------------------------

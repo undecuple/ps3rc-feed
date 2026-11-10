@@ -5,8 +5,9 @@ Order of work in `collect`:
 1. Searches: GET /search/repositories per configured query (per_page 100,
    page cap). `complete` is false when the API says incomplete_results,
    when the page cap or a stop ended the walk, when an item had to be
-   dropped, or when total_count exceeds the distinct ids listed (this
-   covers the API's 1000-result ceiling).
+   dropped, when the listing exceeded the run format's cap, or when
+   total_count exceeds the distinct ids listed (this covers the API's
+   1000-result ceiling).
 2. Roots: GET /repos/{owner}/{repo}/forks per configured root (per_page
    100, page cap). A capped or interrupted walk sets forks_scan_complete
    false and a resume_cursor "page=N".
@@ -20,16 +21,22 @@ Order of work in `collect`:
    and plain 403 -> blocked, other non-200 -> failed; a malformed body, a
    redirect, an oversize body, bad JSON or a transport failure on the
    metadata request -> failed. The same on a sub-request leaves that field
-   null (the repository is then partial) and the run continues. Every such
-   failure is counted in a bounded report.
+   null (the repository is then partial) and the run continues. Metadata
+   that lacks fork, archived, stargazers_count or default_branch is
+   partial too. Every such failure is counted in a bounded report.
 4. A rate limit, the request budget or repeated transport failures stop
-   the run: what was fetched is kept, the repository in progress is marked
-   rate_limited (or failed) with null metrics, the rest is absent (the
-   collector lists them as pending) and named in the report. Nothing is
-   ever recorded as zero because it was not fetched.
-5. The run carries a bounded `collection_report` (stop reason, counts) so
-   a partial run is visible in the file, and is validated with the strict
-   loader before it is returned.
+   the run: what was fetched is kept; a repository whose request was
+   actually made and refused is marked rate_limited (or failed); a
+   repository that was never requested is simply absent from the run (its
+   previous observation, if any, stays as it was) and is counted in
+   collection_report.not_fetched. Nothing is ever recorded as zero because
+   it was not fetched.
+5. The run carries a bounded `collection_report` (complete, stop reason,
+   counts) so a partial run is visible in the file, and is validated with
+   the strict loader before it is returned; the loader cannot be made to
+   raise by response content (every listing is capped and every field
+   bounded first); if it ever did, the result is an InternalError with a
+   fixed message.
 
 Comparison endpoints are not requested: every comparison is reported
 unavailable.
@@ -55,6 +62,9 @@ DEFAULT_README_BYTES = schema.MAX_README
 RELEASES_PER_PAGE = 30
 PER_PAGE = 100
 MAX_REPORT_ERRORS = 100
+# Items kept per listing: the run format's own caps, so validate_run cannot be exceeded by a listing.
+LIST_CAPS = {"search": schema.MAX_IDS, "forks": schema.MAX_IDS, "commits": schema.MAX_COMMITS, "releases": schema.MAX_RELEASES}
+METADATA_EXPECTED = ("fork", "archived", "stargazers_count", "default_branch")
 
 _SPACE_RE = re.compile(r"\s+")
 
@@ -77,35 +87,55 @@ CONFIG = schema.Obj(
     optional=("commit_window_days", "max_requests", "max_repositories", "readme_bytes", "page_caps", "_comment"),
 )
 
+CONFIG_FILE_ERROR = "config: file is not strict JSON (syntax error, duplicate key, fractional or non-finite number)"
+
 
 class ShapeError(github.ResponseError):
     """A response item does not have the fields the endpoint promises."""
 
 
+class InternalError(github.GitHubError):
+    """The adapter produced a run the strict loader refused. Fixed message, no details."""
+
+    def __init__(self):
+        github.GitHubError.__init__(self, "internal error: the collector produced an invalid run; nothing was written")
+
+
 # --- configuration ------------------------------------------------------------
+
+
+def _count_unknown(obj, fields, path):
+    if isinstance(obj, dict):
+        unknown = set(obj) - set(fields)
+        if unknown:
+            raise schema.SchemaError("%s: %d unknown field(s)" % (path, len(unknown)))
 
 
 def validate_config(config):
     """Check a config dict. Error messages name paths and counts, never values or keys from the file."""
     if not isinstance(config, dict):
         raise schema.SchemaError("config: expected an object")
-    unknown = set(config) - set(CONFIG.fields)
-    if unknown:
-        raise schema.SchemaError("config: %d unknown field(s)" % len(unknown))
-    caps = config.get("page_caps")
-    if isinstance(caps, dict):
-        unknown = set(caps) - set(PAGE_CAPS.fields)
-        if unknown:
-            raise schema.SchemaError("config.page_caps: %d unknown field(s)" % len(unknown))
+    _count_unknown(config, CONFIG.fields, "config")
+    _count_unknown(config.get("page_caps"), PAGE_CAPS.fields, "config.page_caps")
+    roots = config.get("roots")
+    if isinstance(roots, list):
+        for i, root in enumerate(roots):
+            _count_unknown(root, ROOT_CONFIG.fields, "config.roots[%d]" % i)
     CONFIG.check(config, "config")
     if not config["queries"] and not config["roots"]:
         raise schema.SchemaError("config: at least one query or one root is required")
     for i, query in enumerate(config["queries"]):
         if "://" in query or schema._SCHEME_RE.match(query) is not None:
             raise schema.SchemaError("config.queries[%d]: a search query must not contain a URL" % i)
-    names = [r["full_name"].lower() for r in config["roots"]]
+    queries = [_normalise_name(q) for q in config["queries"]]
+    if len(set(queries)) != len(queries):
+        raise schema.SchemaError("config.queries: duplicate query")
+    names = [_normalise_name(r["full_name"]) for r in config["roots"]]
     if len(set(names)) != len(names):
         raise schema.SchemaError("config.roots: duplicate full_name")
+    ids = [r["repository_id"] for r in config["roots"]]
+    if len(set(ids)) != len(ids):
+        raise schema.SchemaError("config.roots: duplicate repository_id")
     config.setdefault("commit_window_days", DEFAULT_COMMIT_WINDOW_DAYS)
     config.setdefault("max_requests", DEFAULT_MAX_REQUESTS)
     config.setdefault("max_repositories", DEFAULT_MAX_REPOSITORIES)
@@ -117,26 +147,61 @@ def validate_config(config):
 
 
 def load_config(path):
-    return validate_config(schema.read_json(path))
+    try:
+        data = schema.read_json(path)
+    except schema.SchemaError:
+        raise schema.SchemaError(CONFIG_FILE_ERROR) from None
+    return validate_config(data)
 
 
 def _normalise_name(value):
     return _SPACE_RE.sub(" ", value.strip()).lower()
 
 
-def example_names(path=EXAMPLE_CONFIG_PATH):
-    """Normalised root names and queries of the committed example config."""
+_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9_\-]+")
+
+
+def _tokens(value):
+    """Lower-cased word tokens of a name or query; search qualifiers (words with ':') are not tokens."""
+    tokens = set()
+    for word in _normalise_name(value).split(" "):
+        if ":" in word:
+            continue
+        tokens.update(t for t in _TOKEN_SPLIT_RE.split(word) if t)
+    return tokens
+
+
+def example_placeholders(path=EXAMPLE_CONFIG_PATH):
+    """(placeholder tokens, root ids) of the committed example config.
+
+    Tokens are the owner and name parts of every example root and every
+    word of every example query, so a placeholder is recognised in any
+    position of a query or a root name.
+    """
     example = validate_config(schema.read_json(path))
-    names = set(_normalise_name(r["full_name"]) for r in example["roots"])
-    names.update(_normalise_name(q) for q in example["queries"])
-    return names
+    tokens = set()
+    for root in example["roots"]:
+        tokens.update(_tokens(root["full_name"]))
+    for query in example["queries"]:
+        tokens.update(_tokens(query))
+    ids = set(r["repository_id"] for r in example["roots"])
+    return tokens, ids
+
+
+def example_names(path=EXAMPLE_CONFIG_PATH):
+    return example_placeholders(path)[0]
 
 
 def config_uses_example_names(config, path=EXAMPLE_CONFIG_PATH):
-    """Names in `config` that also appear in the example file (placeholders, never real)."""
-    placeholders = example_names(path)
-    found = [r["full_name"] for r in config["roots"] if _normalise_name(r["full_name"]) in placeholders]
-    found += [q for q in config["queries"] if _normalise_name(q) in placeholders]
+    """Entries of `config` that use a placeholder: an example token in a query or root name, or an example root id."""
+    tokens, ids = example_placeholders(path)
+    found = []
+    for root in config["roots"]:
+        if root["repository_id"] in ids or _tokens(root["full_name"]) & tokens:
+            found.append(root["full_name"])
+    for query in config["queries"]:
+        if _tokens(query) & tokens:
+            found.append(query)
     return found
 
 
@@ -200,7 +265,7 @@ def _timestamp(value, path):
 
 
 def adapt_repository(data, rid, path):
-    """Metadata fields of GET /repositories/{id} in run-format shape, plus a list of softened fields."""
+    """Metadata fields of GET /repositories/{id} in run-format shape, plus notes about softened or missing fields."""
     if _id(data, "id", path) != rid:
         raise ShapeError("response for %s names another repository" % path)
     full_name = _full_name(data, path)
@@ -210,11 +275,14 @@ def adapt_repository(data, rid, path):
         raise ShapeError("response for %s has an owner that does not match full_name" % path)
     parent = _field(data, "parent", (dict,), path, nullable=True)
     source = _field(data, "source", (dict,), path, nullable=True)
-    softened = []
+    notes = []
+    for name in METADATA_EXPECTED:
+        if data.get(name) is None:
+            notes.append("missing:" + name)
     stars = _field(data, "stargazers_count", (int,), path, nullable=True)
     if stars is not None and (stars < 0 or stars > schema.MAX_SAFE_INT):
         stars = None
-        softened.append("stargazers_count")
+        notes.append("range:stargazers_count")
     return {
         "full_name": full_name,
         "owner": full_name.split("/")[0],
@@ -225,7 +293,7 @@ def adapt_repository(data, rid, path):
         "archived": _field(data, "archived", (bool,), path, nullable=True),
         "stars": stars,
         "default_branch": _field(data, "default_branch", (str,), path, nullable=True),
-    }, softened
+    }, notes
 
 
 def adapt_commits(items, path):
@@ -321,9 +389,10 @@ def _empty_repository(rid, full_name, fetch_state):
 
 
 class _Stop(Exception):
-    def __init__(self, reason):
+    def __init__(self, reason, requested):
         Exception.__init__(self, reason)
         self.reason = reason
+        self.requested = requested
 
 
 _STOPS = (github.RateLimited, github.BudgetExhausted, github.NetworkFailed)
@@ -351,11 +420,11 @@ def collect(client, config, run_at):
         "error_count": 0,
         "dropped_items": 0,
         "not_fetched_repository_ids": [],
-        "skipped_unnamed_ids": [],
         "candidates_truncated": False,
     }
     names = {}
     candidates = set()
+    root_ids = set(r["repository_id"] for r in config["roots"])
 
     def note_error(path, reason):
         report["error_count"] += 1
@@ -364,14 +433,23 @@ def collect(client, config, run_at):
 
     def attempt(path, action, *args):
         """One request. Returns (value, None) or (None, failure kind); raises _Stop on a stop."""
+        before = client.requests_made
         try:
             return action(*args), None
         except _STOPS as exc:
-            raise _Stop(github._stop_reason(exc))
+            raise _Stop(github._stop_reason(exc), client.requests_made > before)
         except _FAILURES as exc:
             kind = _failure_kind(exc)
             note_error(path, kind)
             return None, kind
+
+    def capped(items, kind):
+        """Items within the run format's cap; the overflow counts as dropped."""
+        cap = LIST_CAPS[kind]
+        if len(items) > cap:
+            report["dropped_items"] += len(items) - cap
+            return items[:cap], True
+        return items, False
 
     def listed_ids(items, path):
         ids = []
@@ -388,7 +466,7 @@ def collect(client, config, run_at):
     def after_pages(path, pages):
         """A stop seen mid-walk ends the run; any other interruption is an error note."""
         if pages.stopped in _STOP_REASONS:
-            raise _Stop(pages.stopped)
+            raise _Stop(pages.stopped, True)
         if pages.stopped is not None:
             note_error(path, pages.stopped)
 
@@ -402,15 +480,16 @@ def collect(client, config, run_at):
                     note_error("/search/repositories", pages.stopped or "status")
                 continue
             before = report["dropped_items"]
-            ids = listed_ids(pages.items, "/search/repositories")
-            entry["repository_ids"] = sorted(set(ids))
-            candidates.update(ids)
+            items, overflow = capped(pages.items, "search")
+            ids = listed_ids(items, "/search/repositories")
+            entry["repository_ids"] = sorted(set(ids))[: schema.MAX_IDS]
+            candidates.update(entry["repository_ids"])
             total = pages.extra.get("total_count")
             incomplete = pages.extra.get("incomplete_results")
             clean = report["dropped_items"] == before
             # total_count above the distinct ids listed covers the API's 1000-result ceiling too.
             capped_total = isinstance(total, int) and not isinstance(total, bool) and total > len(entry["repository_ids"])
-            entry["complete"] = bool(pages.complete and clean and incomplete is not True and not capped_total)
+            entry["complete"] = bool(pages.complete and clean and not overflow and incomplete is not True and not capped_total)
             after_pages("/search/repositories", pages)
 
         for root in config["roots"]:
@@ -426,12 +505,13 @@ def collect(client, config, run_at):
                     note_error(path, pages.stopped or "status")
                 continue
             before = report["dropped_items"]
-            found = listed_ids(pages.items, path)
-            entry["found_repository_ids"] = list(dict.fromkeys(found))
-            entry["forks_scan_complete"] = bool(pages.complete and report["dropped_items"] == before)
-            if not pages.complete and pages.next_cursor is not None:
+            items, overflow = capped(pages.items, "forks")
+            found = listed_ids(items, path)
+            entry["found_repository_ids"] = list(dict.fromkeys(found))[: schema.MAX_IDS]
+            entry["forks_scan_complete"] = bool(pages.complete and report["dropped_items"] == before and not overflow)
+            if not entry["forks_scan_complete"] and pages.next_cursor is not None:
                 entry["resume_cursor"] = pages.next_cursor
-            candidates.update(found)
+            candidates.update(entry["found_repository_ids"])
             after_pages(path, pages)
 
         ordered = sorted(candidates)
@@ -441,32 +521,27 @@ def collect(client, config, run_at):
             ordered = ordered[: config["max_repositories"]]
         since = _since(run_at, config["commit_window_days"])
         for rid in ordered:
-            full_name = names.get(rid)
+            full_name = names[rid]
             path = "/repositories/%d" % rid
             try:
                 result, failed = attempt(path, client.get_json, path, None, "object")
             except _Stop as stop:
-                if full_name is not None:
+                if stop.requested:
+                    # The request was made and refused: that is a real failure state.
                     state = "rate_limited" if stop.reason == "rate_limited" else "failed"
                     run["repositories"].append(_empty_repository(rid, full_name, state))
                 raise
             if failed or result.status != 200:
-                if full_name is None:
-                    report["skipped_unnamed_ids"].append(rid)
-                    continue
                 run["repositories"].append(_empty_repository(rid, full_name, "failed" if failed else fetch_state_for(result.status)))
                 continue
             try:
-                meta, softened = adapt_repository(result.data, rid, path)
+                meta, notes = adapt_repository(result.data, rid, path)
             except github.ResponseError:
                 note_error(path, "shape")
-                if full_name is None:
-                    report["skipped_unnamed_ids"].append(rid)
-                    continue
                 run["repositories"].append(_empty_repository(rid, full_name, "failed"))
                 continue
-            for field in softened:
-                note_error(path, "range:" + field)
+            for note in notes:
+                note_error(path, note)
             repo = _empty_repository(rid, meta["full_name"], "ok")
             repo.update(meta)
             run["repositories"].append(repo)
@@ -475,18 +550,22 @@ def collect(client, config, run_at):
                 cpath = github.path_for_repo(meta["full_name"], "/commits")
                 pages, failed = attempt(cpath, client.paginate, cpath, {"sha": branch, "since": since, "per_page": PER_PAGE}, caps["commits"])
                 if not failed and pages.items is not None:
-                    commits, dropped = adapt_commits(pages.items, cpath)
+                    items, overflow = capped(pages.items, "commits")
+                    commits, dropped = adapt_commits(items, cpath)
                     report["dropped_items"] += dropped
                     repo["commits"] = commits
-                    repo["commits_complete"] = bool(pages.complete and dropped == 0)
+                    repo["commits_complete"] = bool(pages.complete and dropped == 0 and not overflow)
                     after_pages(cpath, pages)
                 elif not failed:
                     note_error(cpath, pages.stopped or "status")
             rpath = github.path_for_repo(meta["full_name"], "/releases")
             result, failed = attempt(rpath, client.get_json, rpath, {"per_page": RELEASES_PER_PAGE}, "array")
             if not failed and result.status == 200:
-                repo["releases"], dropped = adapt_releases(result.data, rpath)
+                items, overflow = capped(result.data, "releases")
+                repo["releases"], dropped = adapt_releases(items, rpath)
                 report["dropped_items"] += dropped
+                if overflow:
+                    note_error(rpath, "overflow")
             elif not failed:
                 note_error(rpath, "status")
             dpath = github.path_for_repo(meta["full_name"], "/readme")
@@ -499,14 +578,14 @@ def collect(client, config, run_at):
         report["stopped"] = stop.reason
 
     listed = set(r["repository_id"] for r in run["repositories"])
-    report["not_fetched_repository_ids"] = sorted(set(report["not_fetched_repository_ids"]) | (set(candidates) - listed))
+    unfetched = set(report["not_fetched_repository_ids"]) | ((set(candidates) | root_ids) - listed)
+    report["not_fetched_repository_ids"] = sorted(unfetched)[: schema.MAX_IDS]
     run["repositories"].sort(key=lambda r: r["repository_id"])
     complete = (
         report["stopped"] is None
         and report["error_count"] == 0
         and report["dropped_items"] == 0
         and not report["not_fetched_repository_ids"]
-        and not report["skipped_unnamed_ids"]
         and all(s["complete"] for s in run["searches"])
         and all(r["forks_scan_complete"] for r in run["roots"])
         and all(r["fetch_state"] == "ok" and r["commits_complete"] is not False for r in run["repositories"])
@@ -514,12 +593,15 @@ def collect(client, config, run_at):
     run["collection_report"] = {
         "complete": complete,
         "stopped": report["stopped"],
-        "error_count": report["error_count"],
-        "dropped_items": report["dropped_items"],
+        "error_count": min(report["error_count"], schema.MAX_SAFE_INT),
+        "dropped_items": min(report["dropped_items"], schema.MAX_SAFE_INT),
         "not_fetched": len(report["not_fetched_repository_ids"]),
         "requests_made": client.requests_made,
     }
-    schema.validate_run(run)
+    try:
+        schema.validate_run(run)
+    except schema.SchemaError:
+        raise InternalError() from None
     report["complete"] = complete
     report["requests"] = list(client.log)
     report["client"] = client.summary()

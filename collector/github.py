@@ -8,26 +8,29 @@ segments (no empty, "." or ".." segments, no percent-encoded dot, slash
 or backslash). Redirects are errors, never followed. The only URL ever
 taken from a response is a `Link: rel="next"` URL, accepted only when it
 names the same host, the same path and the same query apart from `page`,
-within a page cap.
+whose value must be the current page plus one, within a page cap.
 
 Transports are callables `transport(method, url, headers, timeout) ->
 Response`. `RecordedTransport` answers from canned responses and is what
 the tests and the CLI's dry path use. `LiveTransport` talks http.client
-directly (no proxy, no redirect handler, no netrc, no cookie jar) and is
-constructed only by the CLI's --live path. Every exception a transport
-raises is mapped to `TransportFailed`, whose message names the exception
-class and nothing else.
+directly (no proxy, no redirect handler, no netrc, no cookie jar) under a
+wall-clock deadline enforced by a watchdog timer, and is constructed only
+by the CLI's --live path. Every exception a transport raises is mapped to
+`TransportFailed`, whose message names the exception class and nothing
+else.
 
 Budget: a hard cap on requests per client; page caps per listing; three
 consecutive transport failures stop the client (`NetworkFailed`). Rate
 limits: a parsed `x-ratelimit-remaining` of 0, a 429, or a 403 carrying
 `retry-after` or a zero remaining stops the client (`RateLimited`); the
 client never sleeps and never forgets a recorded limit within a run.
-Header values that are not bounded integers are ignored (unknown).
+Header values that are not bounded integers are ignored (unknown);
+duplicate headers keep the most restrictive value.
 
-Responses: body capped (MAX_BODY), strict JSON (no duplicate keys, no
-NaN/Infinity), shape checked against what the endpoint promises; errors
-name the request path and never include a body or a header.
+Responses: body capped (MAX_BODY), headers capped (MAX_HEADER_BYTES),
+strict JSON (no duplicate keys, no NaN/Infinity), shape checked against
+what the endpoint promises; errors name the request path and never
+include a body or a header.
 
 The token is wrapped in `Secret`: it must be 1-255 characters of letters,
 digits, '_' or '-' (GitHub tokens fit this), its repr and str are
@@ -39,6 +42,7 @@ import http.client
 import json
 import re
 import ssl
+import threading
 import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
@@ -47,6 +51,8 @@ from . import schema
 API_HOST = "api.github.com"
 API_BASE = "https://" + API_HOST
 MAX_BODY = 2 * 1024 * 1024
+MAX_HEADER_BYTES = 64 * 1024
+MAX_LINK_HEADER = 8192
 DEFAULT_TIMEOUT = 10
 DEFAULT_DEADLINE = 20
 READ_CHUNK = 65536
@@ -62,7 +68,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{1,255}\Z")
 _PRINTABLE_RE = re.compile(r"[\x21-\x7e]{1,2048}\Z")
 _PATH_RE = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*\Z")
 _BAD_ESCAPE_RE = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
-_LINK_RE = re.compile(r'<([^>]*)>\s*;\s*rel="([a-z]+)"')
+_LINK_ENTRY_RE = re.compile(r"<([^<>\s]*)>((?:\s*;\s*[^;]*)*)\Z")
 _DIGITS_RE = re.compile(r"[0-9]{1,13}\Z")
 
 
@@ -76,6 +82,10 @@ class TransportRefused(GitHubError):
 
 class ResponseError(GitHubError):
     """The response cannot be used: redirect, oversize, bad JSON or wrong shape."""
+
+
+class LinkError(ResponseError):
+    """A Link header is present but not usable."""
 
 
 class TransportFailed(GitHubError):
@@ -122,12 +132,57 @@ class Secret:
     __hash__ = None
 
 
+# --- headers ------------------------------------------------------------------
+
+
+def header_int(value, lo=0, hi=MAX_HEADER_INT):
+    """A header value as a bounded non-negative integer, or None when it is anything else."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if _DIGITS_RE.fullmatch(text) is None:
+        return None
+    number = int(text)
+    if number < lo or number > hi:
+        return None
+    return number
+
+
+def merge_headers(pairs):
+    """Lower-cased header dict. Duplicates: Link joined; rate-limit values most restrictive; others first.
+
+    A Content-Length repeated with different values becomes "conflict",
+    which the transports treat as a failed response.
+    """
+    seen = {}
+    for key, value in pairs:
+        seen.setdefault(str(key).lower(), []).append(str(value))
+    merged = {}
+    for key, values in seen.items():
+        if len(values) == 1:
+            merged[key] = values[0]
+        elif key == "link":
+            merged[key] = ", ".join(values)
+        elif key in ("x-ratelimit-remaining", "x-ratelimit-reset"):
+            numbers = [n for n in (header_int(v, lo=1 if key.endswith("reset") else 0) for v in values) if n is not None]
+            merged[key] = str(min(numbers)) if numbers else values[0]
+        elif key == "retry-after":
+            numbers = [n for n in (header_int(v) for v in values) if n is not None]
+            merged[key] = str(max(numbers)) if numbers else values[0]
+        elif key == "content-length":
+            merged[key] = values[0] if len(set(values)) == 1 else "conflict"
+        else:
+            merged[key] = values[0]
+    return merged
+
+
 class Response:
-    """What a transport returns. Header names are lower-cased."""
+    """What a transport returns. Headers may be a dict or a list of pairs; names are lower-cased."""
 
     def __init__(self, status, headers, body):
         self.status = int(status)
-        self.headers = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+        pairs = headers.items() if isinstance(headers, dict) else list(headers or [])
+        self.headers = merge_headers(pairs)
         self.body = body if isinstance(body, bytes) else str(body).encode("utf-8")
 
 
@@ -207,14 +262,64 @@ def build_url(path, params=None):
     return url
 
 
+def parse_link(header):
+    """Entries of a Link header as (url, set of lower-cased rel tokens).
+
+    Absent header -> []. A header that is present but has no well-formed
+    entry, or is too long, raises LinkError. rel values may be quoted or
+    bare and may hold several space-separated tokens.
+    """
+    if header is None:
+        return []
+    if not isinstance(header, str) or len(header) > MAX_LINK_HEADER or not header.strip():
+        raise LinkError("Link header is not usable")
+    parts = []
+    depth = 0
+    current = []
+    for ch in header:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(ch)
+    parts.append("".join(current))
+    entries = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        match = _LINK_ENTRY_RE.fullmatch(part)
+        if match is None:
+            raise LinkError("Link header entry is malformed")
+        rels = set()
+        for param in match.group(2).split(";"):
+            param = param.strip()
+            if not param:
+                continue
+            if "=" not in param:
+                raise LinkError("Link header parameter is malformed")
+            name, value = param.split("=", 1)
+            if name.strip().lower() == "rel":
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                rels.update(token.lower() for token in value.split())
+        entries.append((match.group(1), rels))
+    if not entries:
+        raise LinkError("Link header has no entries")
+    return entries
+
+
 def parse_link_next(link_header):
-    """The rel="next" URL of a Link header, or None."""
-    if not link_header:
-        return None
-    for url, rel in _LINK_RE.findall(link_header):
-        if rel == "next":
-            return url
-    return None
+    """The single rel="next" URL of a Link header, or None. More than one is a LinkError."""
+    nexts = [url for url, rels in parse_link(link_header) if "next" in rels]
+    if len(nexts) > 1:
+        raise LinkError("Link header names more than one next page")
+    return nexts[0] if nexts else None
 
 
 def _query_dict(query):
@@ -227,8 +332,12 @@ def _query_dict(query):
     return result
 
 
-def check_next_url(next_url, request_path, request_query):
-    """A next URL must be on the API host, name the same path and the same query apart from `page`."""
+def check_next_url(next_url, request_path, request_query, expected_page=None):
+    """A next URL must be on the API host, name the same path and the same query apart from `page`.
+
+    `page` must be digits; when expected_page is given it must equal it
+    (the walk never jumps or loops).
+    """
     path, query = check_url(next_url)
     if path != request_path:
         raise TransportRefused("refused: Link next URL names a different path")
@@ -238,6 +347,8 @@ def check_next_url(next_url, request_path, request_query):
     page = theirs.pop("page", None)
     if page is None or _DIGITS_RE.fullmatch(page) is None:
         raise TransportRefused("refused: Link next URL has no page number")
+    if expected_page is not None and int(page) != expected_page:
+        raise TransportRefused("refused: Link next URL does not name the next page")
     if mine != theirs:
         raise TransportRefused("refused: Link next URL changes the query")
     return next_url
@@ -270,19 +381,6 @@ def parse_json(body, path):
         raise ResponseError("response for %s is not strict JSON" % path) from None
 
 
-def header_int(value, lo=0, hi=MAX_HEADER_INT):
-    """A header value as a bounded non-negative integer, or None when it is anything else."""
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    if _DIGITS_RE.fullmatch(text) is None:
-        return None
-    number = int(text)
-    if number < lo or number > hi:
-        return None
-    return number
-
-
 # --- transports -------------------------------------------------------------
 
 
@@ -291,6 +389,7 @@ class RecordedTransport:
 
     An entry may be a response dict, a list of them (served in turn), or a
     dict with "raise": "<ExceptionName>" to simulate a transport failure.
+    Headers may be a dict or a list of [name, value] pairs.
     """
 
     def __init__(self, routes):
@@ -336,15 +435,43 @@ def _simulated_exception(name):
     return table.get(name, RuntimeError(name))
 
 
+def tls_context():
+    """The TLS context the live transport uses: certificate and hostname verified, TLS 1.2 or newer.
+
+    Python's default context trusts the system store; OpenSSL also honours
+    the SSL_CERT_FILE and SSL_CERT_DIR environment variables.
+    """
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
+def _abort_connection(connection):
+    """Watchdog action: close the socket so a hanging phase ends with an exception."""
+    for target in (getattr(connection, "sock", None), connection):
+        try:
+            if target is not None:
+                target.close()
+        except Exception:
+            pass
+
+
 class LiveTransport:
     """http.client transport for the --live path only. Tests drive it with a fake connection class.
 
-    One HTTPSConnection to api.github.com per request, default SSL
-    context, no proxy (http.client reads no proxy environment), no
+    One HTTPSConnection to api.github.com per request, TLS context from
+    tls_context(), no proxy (http.client reads no proxy environment), no
     redirect following (a 3xx is returned as its status and the client
-    refuses it), no netrc, no cookies, no Accept-Encoding. The body is read
-    in chunks up to the cap plus one byte under a wall-clock deadline; a
-    body shorter than its Content-Length is a failure, not a 200.
+    refuses it), no netrc, no cookies, no Accept-Encoding. A wall-clock
+    deadline covers connect, request, headers and body: a watchdog timer
+    closes the connection at the deadline and the socket timeout is set
+    from the remaining time before each phase and each read. Headers are
+    capped in total size, a 1xx final status and a conflicting or invalid
+    Content-Length are failures, the body is read in chunks up to the cap
+    plus one byte, and a body shorter than its Content-Length is a
+    failure, not a 200.
     """
 
     def __init__(self, timeout=DEFAULT_TIMEOUT, max_body=MAX_BODY, deadline=DEFAULT_DEADLINE, connection_factory=None):
@@ -359,14 +486,37 @@ class LiveTransport:
         path, query = check_url(url)
         target = path + ("?" + query if query else "")
         factory = self._factory or http.client.HTTPSConnection
+        started = time.monotonic()
+        per_phase = timeout or self.timeout
+
+        def remaining():
+            left = self.deadline - (time.monotonic() - started)
+            if left <= 0:
+                raise TransportFailed(TimeoutError("deadline"), path)
+            return min(per_phase, left)
+
         connection = None
+        watchdog = None
         try:
-            connection = factory(API_HOST, 443, timeout=timeout or self.timeout, context=ssl.create_default_context())
+            connection = factory(API_HOST, 443, timeout=remaining(), context=tls_context())
+            watchdog = threading.Timer(self.deadline, _abort_connection, args=(connection,))
+            watchdog.daemon = True
+            watchdog.start()
             connection.request("GET", target, headers=dict(headers))
+            self._set_timeout(connection, remaining())
             response = connection.getresponse()
+            # The header phase is covered by the watchdog and by the first remaining() in _read.
             status = int(response.status)
-            response_headers = {str(k).lower(): str(v) for k, v in response.getheaders()}
-            body = self._read(response, response_headers, path)
+            if 100 <= status < 200:
+                raise TransportFailed(http.client.HTTPException("1xx"), path)
+            pairs = list(response.getheaders())
+            if sum(len(str(k)) + len(str(v)) for k, v in pairs) > MAX_HEADER_BYTES:
+                raise TransportFailed(http.client.LineTooLong("headers"), path)
+            merged = merge_headers(pairs)
+            declared = merged.get("content-length")
+            if declared is not None and header_int(declared) is None:
+                raise TransportFailed(http.client.HTTPException("content-length"), path)
+            body = self._read(response, merged, path, connection, remaining)
         except GitHubError:
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -374,21 +524,32 @@ class LiveTransport:
         except BaseException as exc:
             raise TransportFailed(exc, path) from None
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
             if connection is not None:
                 try:
                     connection.close()
                 except Exception:
                     pass
-        return Response(status, response_headers, body)
+        return Response(status, merged, body)
 
-    def _read(self, response, headers, path):
+    @staticmethod
+    def _set_timeout(connection, seconds):
+        connection.timeout = seconds
+        sock = getattr(connection, "sock", None)
+        settimeout = getattr(sock, "settimeout", None)
+        if settimeout is not None:
+            try:
+                settimeout(seconds)
+            except Exception:
+                pass
+
+    def _read(self, response, headers, path, connection, remaining):
         chunks = []
         total = 0
-        started = time.monotonic()
         limit = self.max_body + 1
         while total < limit:
-            if time.monotonic() - started > self.deadline:
-                raise TransportFailed(TimeoutError("deadline"), path)
+            self._set_timeout(connection, remaining())
             chunk = response.read(min(READ_CHUNK, limit - total))
             if not chunk:
                 break
@@ -482,6 +643,7 @@ class Client:
             raise self._note_transport_failure(TransportFailed(exc, path)) from None
         if not isinstance(response, Response):
             raise self._note_transport_failure(TransportFailed(TypeError("no response"), path))
+        # Any answer from the server, whatever its status, ends a failure streak.
         self.consecutive_failures = 0
         self._note_rate_limit(response, path)
         if 300 <= response.status < 400:
@@ -544,9 +706,10 @@ class Client:
         """Walk Link rel="next" pages from page 1 up to `cap` pages.
 
         Returns Pages. A stop (rate limit, budget, network) on page 1 is
-        raised; a failure (transport, unusable response) on page 1 returns
-        no items with `stopped` set; after page 1 the items already fetched
-        are returned with complete=False, a "page=N" cursor and `stopped`.
+        raised; a failure (transport, unusable response or Link) on page 1
+        returns no items with `stopped` set; after page 1 the items already
+        fetched are returned with complete=False, a "page=N" cursor and
+        `stopped`. The next page must be numbered page + 1.
         """
         if not isinstance(cap, int) or cap < 1:
             raise ValueError("page cap must be a positive integer")
@@ -586,13 +749,14 @@ class Client:
                 items.extend(data[items_key])
             else:
                 items.extend(data)
-            next_url = parse_link_next(response.headers.get("link"))
+            try:
+                next_url = parse_link_next(response.headers.get("link"))
+                if next_url is not None:
+                    check_next_url(next_url, path, request_query, page + 1)
+            except (LinkError, TransportRefused):
+                return Pages(items, False, "page=%d" % (page + 1), 200, "response", extra)
             if next_url is None:
                 return Pages(items, True, None, 200, None, extra)
-            try:
-                check_next_url(next_url, path, request_query)
-            except TransportRefused:
-                return Pages(items, False, "page=%d" % (page + 1), 200, "response", extra)
             if page >= cap:
                 return Pages(items, False, "page=%d" % (page + 1), 200, None, extra)
             page += 1

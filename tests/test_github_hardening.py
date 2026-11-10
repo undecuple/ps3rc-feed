@@ -452,7 +452,8 @@ class K6LiveWrite(CollectorTestCase):
                     self.assertEqual(code, 0, err)
                     self.assertTrue(os.path.exists(os.path.join(fake_repo, "data", "rel.json")))
                     # Partial: budget stops the run -> report says so, exit 3, file still valid.
-                    code, out, err = _run_cli(["collect", "--config", config_path, "--live", "--max-requests", "4", "--out", out_path, "--run-at", RUN_AT], env={"GITHUB_TOKEN": SENTINEL})
+                    # The target exists from the first run, so --overwrite is required.
+                    code, out, err = _run_cli(["collect", "--config", config_path, "--live", "--max-requests", "4", "--out", out_path, "--overwrite", "--run-at", RUN_AT], env={"GITHUB_TOKEN": SENTINEL})
                     self.assertEqual(code, 3, err)
                     written = schema.load_run_file(out_path)
                     self.assertEqual(written["collection_report"]["stopped"], "budget")

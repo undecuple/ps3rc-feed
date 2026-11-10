@@ -29,6 +29,7 @@ def empty_state():
             "incomplete_roots": [],
             "pending_repository_ids": [],
             "rejected_fields": [],
+            "last_run": {"last_run_at": None, "complete": True, "stopped": None, "not_fetched": 0, "error_count": 0},
         },
     }
 

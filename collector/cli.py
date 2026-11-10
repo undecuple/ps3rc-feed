@@ -34,12 +34,13 @@ resolved path must stay inside tests/fixtures.
 """
 
 import argparse
+import errno
 import json
 import os
 import re
+import secrets
 import stat
 import sys
-import tempfile
 from datetime import datetime, timezone
 
 from . import catalog, collect, events, github, schema, store
@@ -174,6 +175,7 @@ def build_parser():
     col.add_argument("--anonymous", action="store_true", help="with --live: allow running without GITHUB_TOKEN")
     col.add_argument("--max-requests", type=int, help="with --live: hard request budget for this run (required)")
     col.add_argument("--out", help="with --live: run file to write, under the data/ directory")
+    col.add_argument("--overwrite", action="store_true", help="with --live: replace an existing --out file")
     return parser
 
 
@@ -190,8 +192,11 @@ def _refuse(message):
     return 2
 
 
-def resolve_out_path(value):
+def resolve_out_path(value, overwrite=False):
     """The run file path for --live: a .json file under <repo>/data/, with no symbolic link on the way.
+
+    An existing regular file at the target is refused unless overwrite is
+    set (checked here before any request, and again at write time).
 
     A relative path resolves against the repository root. Every existing
     component from the repository root down to the file is lstat'ed; a
@@ -201,6 +206,8 @@ def resolve_out_path(value):
     """
     if not isinstance(value, str) or not value:
         raise RefusedInput("refused: --live requires --out under the data/ directory")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise RefusedInput("refused: --out contains a control character")
     candidate = value if os.path.isabs(value) else os.path.join(REPO_ROOT, value)
     normalised = os.path.normpath(candidate)
     data_root = os.path.normpath(DATA_ROOT)
@@ -221,37 +228,95 @@ def resolve_out_path(value):
             raise RefusedInput("refused: --out path component is not a directory")
         if walk == normalised and not stat.S_ISREG(st.st_mode):
             raise RefusedInput("refused: --out exists and is not a regular file")
+        if walk == normalised and not overwrite:
+            raise RefusedInput("refused: --out exists; pass --overwrite to replace it")
     return normalised
 
 
-def write_run_file(run, out_path):
-    """Write the run atomically: exclusive temp file in the target directory, fsync, replace, mode 0644."""
-    directory = os.path.dirname(out_path)
-    os.makedirs(directory, exist_ok=True)
-    if os.path.islink(directory) or os.path.islink(out_path):
-        raise RefusedInput("refused: --out path contains a symbolic link")
-    data = (json.dumps(run, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
-    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(out_path) + ".", suffix=".tmp", dir=directory)
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_dir(name, dir_fd=None):
+    """Open a directory without following a symbolic link in its last component."""
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp, 0o644)
-        if os.path.islink(out_path):
-            raise RefusedInput("refused: --out path contains a symbolic link")
-        os.replace(tmp, out_path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            # Linux reports a link under O_DIRECTORY|O_NOFOLLOW as ENOTDIR; tell the two apart for the message.
+            try:
+                is_link = stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode)
+            except OSError:
+                is_link = exc.errno == errno.ELOOP
+            if is_link:
+                raise RefusedInput("refused: --out path contains a symbolic link") from None
+            raise RefusedInput("refused: --out path component is not a directory") from None
         raise
-    dir_fd = os.open(directory, os.O_RDONLY)
+
+
+def write_run_file(run, out_path, overwrite=False):
+    """Write the run through directory descriptors, never following a link.
+
+    The repository root is opened, then each component down to the target
+    directory with O_DIRECTORY|O_NOFOLLOW relative to the previous
+    descriptor (created with mkdir on that descriptor when missing, mode
+    0755 before umask). The run goes to a randomly named temp file opened
+    with O_CREAT|O_EXCL|O_NOFOLLOW on the directory descriptor, mode 0644,
+    is fsync'ed, renamed over the target with both directory descriptors
+    (after a final lstat of the target), and the directory is fsync'ed. An
+    existing regular target is replaced only with overwrite=True; anything
+    else at the target is refused. On any failure the temp file is removed.
+    """
+    data = (json.dumps(run, indent=1, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
+    root = os.path.normpath(REPO_ROOT)
+    relative = os.path.relpath(os.path.normpath(out_path), root)
+    if relative.startswith(os.pardir) or os.path.isabs(relative):
+        raise RefusedInput("refused: --out must lie under the repository")
+    parts = relative.split(os.sep)
+    name = parts[-1]
+    fd = _open_dir(root)
     try:
-        os.fsync(dir_fd)
+        for part in parts[:-1]:
+            try:
+                child = _open_dir(part, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o755, dir_fd=fd)
+                child = _open_dir(part, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        _check_target(name, fd, overwrite)
+        tmp = "%s.%s.tmp" % (name, secrets.token_hex(8))
+        tfd = os.open(tmp, _FILE_FLAGS, 0o644, dir_fd=fd)
+        try:
+            with os.fdopen(tfd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fchmod(fh.fileno(), 0o644)
+                os.fsync(fh.fileno())
+            _check_target(name, fd, overwrite)
+            os.rename(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=fd)
+            except OSError:
+                pass
+            raise
+        os.fsync(fd)
     finally:
-        os.close(dir_fd)
+        os.close(fd)
+
+
+def _check_target(name, dir_fd, overwrite):
+    try:
+        st = os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode):
+        raise RefusedInput("refused: --out path contains a symbolic link")
+    if not stat.S_ISREG(st.st_mode):
+        raise RefusedInput("refused: --out exists and is not a regular file")
+    if not overwrite:
+        raise RefusedInput("refused: --out exists; pass --overwrite to replace it")
 
 
 def _check_max_requests(value):
@@ -268,6 +333,8 @@ def run_collect(args):
     schema.TIMESTAMP.check(run_at, "--run-at")
     if args.max_requests is not None:
         _check_max_requests(args.max_requests)
+    if args.live and args.recorded:
+        raise RefusedInput("refused: --live and --recorded cannot be combined")
 
     if not args.live:
         if args.out:
@@ -293,7 +360,7 @@ def run_collect(args):
         token_text = os.environ.get("GITHUB_TOKEN") or None
         if token_text is None:
             raise RefusedInput("refused: GITHUB_TOKEN is not set; export it or pass --anonymous for unauthenticated public access")
-    out_path = resolve_out_path(args.out)
+    out_path = resolve_out_path(args.out, overwrite=args.overwrite)
     placeholders = collect.config_uses_example_names(config)
     if placeholders:
         raise RefusedInput("refused: config uses %d placeholder name(s) from config/sources.example.json" % len(placeholders))
@@ -305,7 +372,7 @@ def run_collect(args):
     transport = github.LiveTransport()
     client = github.Client(transport, token=token, max_requests=max_requests, page_caps=config["page_caps"])
     run, report = collect.collect(client, config, run_at)
-    write_run_file(run, out_path)
+    write_run_file(run, out_path, overwrite=args.overwrite)
     _print(
         {
             "written": os.path.relpath(out_path, REPO_ROOT),

@@ -751,6 +751,16 @@ COLLECTION = Obj(
         "pending_repository_ids": List(PositiveId(), MAX_IDS),
         # Fields the last run's loader downgraded instead of refusing the run.
         "rejected_fields": List(REJECTED, MAX_REJECTED),
+        # Whether the last applied run fetched everything it set out to fetch.
+        "last_run": Obj(
+            {
+                "last_run_at": Nullable(TIMESTAMP),
+                "complete": Bool(),
+                "stopped": Nullable(Enum(("rate_limited", "budget", "network"))),
+                "not_fetched": NonNegInt(),
+                "error_count": NonNegInt(),
+            }
+        ),
     }
 )
 
