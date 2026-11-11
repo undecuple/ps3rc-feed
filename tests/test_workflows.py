@@ -689,7 +689,7 @@ class OverlayScript(unittest.TestCase):
         self.assertEqual(self.dest_feed(), feed)
 
     def test_an_abnormal_stop_is_refused(self):
-        for stopped in ("rate_limited", "search_rate_limited", "code_search_rate_limited", "network", "", 0, False):
+        for stopped in ("rate_limited", "search_rate_limited", "code_search_rate_limited", "network", "unauthorized", "", 0, False):
             with self.subTest(stopped=stopped):
                 self.assertRefused(feed_bytes(4, stopped=stopped), "stopped abnormally")
         self.assertRefused(feed_bytes(4, collection="text"), "collection is not an object")

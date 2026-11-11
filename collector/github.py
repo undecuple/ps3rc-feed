@@ -28,7 +28,9 @@ limits are tracked per resource bucket (the x-ratelimit-resource header:
 core, search, code_search, ...; an answer without it counts as core): a
 parsed
 remaining of 0 exhausts that bucket, and a request against an exhausted
-bucket raises RateLimited naming it before any transport call. A 403 or
+bucket raises RateLimited naming it before any transport call. A 401
+(the token was rejected) raises Unauthorized, a stop, and every later
+request is refused before the transport. A 403 or
 429 carrying retry-after, or a 429 while the bucket still has requests
 left, is a secondary limit and stops everything, with one exception: on
 GET /search/code (whose bucket is not at 0) it ends code search only, after
@@ -173,6 +175,10 @@ class NetworkFailed(GitHubError):
     """Several transport failures in a row; the run must stop."""
 
 
+class Unauthorized(GitHubError):
+    """GitHub answered 401: the token was rejected. The run must stop."""
+
+
 class Secret:
     """Holds a token. Its text appears nowhere but in `reveal()`."""
 
@@ -268,7 +274,7 @@ class Pages:
 
     complete is False when the cap or a stop ended the walk; `stopped` says
     why ("rate_limited", "search_rate_limited", "code_search_rate_limited",
-    "code_search_secondary_limited", "budget", "network",
+    "code_search_secondary_limited", "budget", "network", "unauthorized",
     "transport", "response", "status" or None); `status` is the first
     page's HTTP status (None when the first page produced no usable
     response).
@@ -690,6 +696,7 @@ class Client:
         self.consecutive_failures = 0
         self.transport_failures = 0
         self.network_failed = False
+        self.unauthorized = False
         # Code search secondary limits: the client is waiting-capable only here (tests pass a fake
         # sleep and a fixed jitter).
         self._sleep = time.sleep if sleep is None else sleep
@@ -792,6 +799,8 @@ class Client:
             raise RateLimited("%s rate limit reached; not requesting %s" % (resource, path), resource)
         if resource == CODE_SEARCH and self.code_search_limited:
             raise CodeSearchLimited("code search secondary limit already met; not requesting %s" % path, answered=False)
+        if self.unauthorized:
+            raise Unauthorized("token rejected earlier; not requesting %s" % path)
         if self.network_failed:
             raise NetworkFailed("%d consecutive transport failures; not requesting %s" % (self.consecutive_failures, path))
         if self.requests_made >= self.max_requests:
@@ -816,6 +825,9 @@ class Client:
         # Any answer from the server, whatever its status, ends a failure streak.
         self.consecutive_failures = 0
         self._note_rate_limit(response, path)
+        if response.status == 401:
+            self.unauthorized = True
+            raise Unauthorized("unauthorized (status 401) for %s" % path)
         if 300 <= response.status < 400:
             raise ResponseError("redirect refused for %s (status %d)" % (path, response.status))
         if len(response.body) > self.max_body:
@@ -902,7 +914,7 @@ class Client:
     def paginate(self, path, params, cap, expect="array", items_key=None, repository_id=None):
         """Walk Link rel="next" pages from page 1 up to `cap` pages.
 
-        Returns Pages. A stop (rate limit, budget, network) on page 1 is
+        Returns Pages. A stop (rate limit, budget, network, 401) on page 1 is
         raised; a failure (transport, unusable response or Link) on page 1
         returns no items with `stopped` set; after page 1 the items already
         fetched are returned with complete=False, a "page=N" cursor and
@@ -922,7 +934,7 @@ class Client:
             try:
                 response = self.get_url(url)
                 result = self._parse(response, path, expect)
-            except (RateLimited, BudgetExhausted, NetworkFailed) as exc:
+            except (RateLimited, BudgetExhausted, NetworkFailed, Unauthorized) as exc:
                 if page == 1:
                     raise
                 return Pages(items, False, "page=%d" % page, 200, _stop_reason(exc), extra)
@@ -976,6 +988,8 @@ def _stop_reason(exc):
         return "rate_limited"
     if isinstance(exc, BudgetExhausted):
         return "budget"
+    if isinstance(exc, Unauthorized):
+        return "unauthorized"
     return "network"
 
 

@@ -631,10 +631,10 @@ class _Stop(Exception):
         self.requested = requested
 
 
-_STOPS = (github.RateLimited, github.BudgetExhausted, github.NetworkFailed)
+_STOPS = (github.RateLimited, github.BudgetExhausted, github.NetworkFailed, github.Unauthorized)
 _FAILURES = (github.ResponseError, github.TransportFailed, github.TransportRefused)
 # Reasons that end the whole run; a search bucket running out does not.
-_RUN_STOPS = ("rate_limited", "budget", "network")
+_RUN_STOPS = ("rate_limited", "budget", "network", "unauthorized")
 SEARCH_STOP = "search_rate_limited"
 CODE_SEARCH_STOP = "code_search_rate_limited"
 SEARCH_STOPS = (SEARCH_STOP, CODE_SEARCH_STOP)

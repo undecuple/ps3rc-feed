@@ -69,13 +69,26 @@ def _check_components(real, real_root, label="the fixture root"):
             raise RefusedInput("refused: not a regular file or directory")
 
 
-def resolve_fixture_path(value, root=None, label="the fixture root"):
+def resolve_fixture_path(value, root=None, label="the fixture root", flag=None, missing_hint=None):
     """Return the real path of `value` if it is a plain path inside `root`, else raise RefusedInput.
 
     Anything that looks like a URL is refused before it is touched; every
     component inside the root must be a real directory or regular file,
     never a link or a special file; the resolved path must stay inside.
+    With `flag`, a refusal names it; `missing_hint` is added when the path does not exist.
     """
+    try:
+        return _resolve_fixture_path(value, root, label)
+    except RefusedInput as exc:
+        if flag is None:
+            raise
+        text = str(exc).replace("refused: ", "refused: %s: " % flag, 1)
+        if missing_hint and "does not exist" in text:
+            text += "; " + missing_hint
+        raise RefusedInput(text) from None
+
+
+def _resolve_fixture_path(value, root, label):
     if root is None:
         root = FIXTURE_ROOT
     if not isinstance(value, str) or not value:
@@ -380,7 +393,7 @@ def resolve_run_inputs(values):
     """Run files for export: regular .json files under data/, same path rules as the fixture inputs, no duplicates."""
     files = []
     for value in values:
-        real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory")
+        real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory", flag="--runs")
         if not (stat.S_ISREG(os.lstat(real).st_mode) and real.endswith(".json")):
             raise RefusedInput("refused: --runs takes .json run files under the data/ directory")
         if real in files:
@@ -415,7 +428,7 @@ def resolve_export_targets(out_dir, overwrite=False):
 def resolve_state_input(value, flag="--state-in"):
     """--state-in (or collect's --previous-state): a regular .json file under data/, with the same path rules as --runs."""
     _check_path_text(value, flag)
-    real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory")
+    real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory", flag=flag, missing_hint="run export --state-out first")
     if not (stat.S_ISREG(os.lstat(real).st_mode) and real.endswith(".json")):
         raise RefusedInput("refused: %s takes a .json state file under the data/ directory" % flag)
     return real
@@ -580,7 +593,7 @@ def resolve_history_dir(value):
 def resolve_feed_input(value, flag, history_dir):
     """--feed or --import-feed: a regular .json file under data/ (the --runs path rules), outside the history directory."""
     _check_path_text(value, flag)
-    real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory")
+    real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory", flag=flag)
     st = os.lstat(real)
     if not (stat.S_ISREG(st.st_mode) and real.endswith(".json")):
         raise RefusedInput("refused: %s takes a .json feed file under the data/ directory" % flag)
@@ -804,7 +817,7 @@ def run_collect(args):
         if args.out:
             raise RefusedInput("refused: --out requires --live; without --live nothing is written")
         if args.recorded:
-            recorded_path = resolve_fixture_path(args.recorded)
+            recorded_path = resolve_fixture_path(args.recorded, flag="--recorded")
             if not stat.S_ISREG(os.lstat(recorded_path).st_mode):
                 raise RefusedInput("refused: --recorded must name a regular file under tests/fixtures")
             transport = github.RecordedTransport.from_file(recorded_path)
@@ -818,6 +831,8 @@ def run_collect(args):
                 payload["skipped_code_queries"] = skipped
         if previous_summary is not None:
             payload["previous_state"] = previous_summary
+        budget = config["max_requests"] if args.max_requests is None else min(args.max_requests, config["max_requests"])
+        sys.stderr.write("%d requests planned; budget %d\n" % (len(payload["plan"]), budget))
         _print(payload)
         return EXIT_OK
 
@@ -864,6 +879,13 @@ def run_collect(args):
     if previous_summary is not None:
         summary["previous_state"] = previous_summary
     _print(summary)
+    if report["stopped"] == "budget":
+        sys.stderr.write("stopped: request budget of %d reached; %d repositories not fetched\n" % (max_requests, len(report["not_fetched_repository_ids"])))
+    elif report["stopped"] == "unauthorized":
+        if token is not None:
+            sys.stderr.write("token rejected by GitHub (401); check or regenerate the token\n")
+        else:
+            sys.stderr.write("request rejected by GitHub (401) without a token\n")
     return EXIT_OK if report["complete"] else EXIT_PARTIAL
 
 

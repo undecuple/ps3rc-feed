@@ -73,7 +73,9 @@ no permissions is enough for public data. Put it in the environment of the comma
 be 1-4096 characters of letters, digits, `_`, `-` and `.`: classic `ghp_` and `github_pat_` tokens fit, and so does the
 Actions `GITHUB_TOKEN` (`ghs_` and a dotted text of about 520 characters). Anything else is refused with the allowed
 form and the observed length only, never any character of the value. The collector
-refuses the placeholder example config. The live write path uses POSIX file operations, so it targets Linux and macOS.
+refuses the placeholder example config. A token GitHub rejects (HTTP 401 on any request) stops the run at once with
+stop reason `unauthorized`, prints "token rejected by GitHub (401); check or regenerate the token" and exits 3; such
+a run is never published. The live write path uses POSIX file operations, so it targets Linux and macOS.
 
 `data/` is ignored by git. Run files are never committed.
 
@@ -82,7 +84,7 @@ refuses the placeholder example config. The live write path uses POSIX file oper
 | 0 | complete (for `export`: files written) |
 | 1 | error (for `export`: an invalid run or state file) |
 | 2 | refused |
-| 3 | partial, for example stopped by the budget or a rate limit |
+| 3 | partial, for example stopped by the budget, a rate limit or a rejected token (401) |
 
 `config/sources.example.json` holds fictional placeholders only. `config/sources.json` holds the reviewed roots and
 search queries.
@@ -193,7 +195,7 @@ When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand fr
 1. Collects with `--max-requests 800`.
 2. Exports on top of the state saved by the previous run.
 3. Checks the run. An abnormal stop publishes nothing: when the run stopped for anything but the request budget
-   (`rate_limited`, `search_rate_limited`, `code_search_rate_limited`, `network`) or the feed lists no repositories,
+   (`rate_limited`, `search_rate_limited`, `code_search_rate_limited`, `network`, `unauthorized`) or the feed lists no repositories,
    the collect job prints the reason and fails, and nothing is pushed or deployed.
 4. Saves `state.json`, `feed.json` and `manifest.json` on the `feed-state` branch. Each run replaces the branch with
    one commit. Run files are never committed. A feed with under half the repositories of the committed
