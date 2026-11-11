@@ -604,6 +604,41 @@
         "afro samurai"
       ],
       "platform": "PS3"
+    },
+    {
+      "key": "flow",
+      "title": "flOw",
+      "aliases": [
+        "thatgamecompany flow"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "comet-crash",
+      "title": "Comet Crash",
+      "aliases": [
+        "comet crash"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "bleach-soul-resurreccion",
+      "title": "Bleach: Soul Resurrección",
+      "aliases": [
+        "bleach soul resurreccion"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "civilization-revolution",
+      "title": "Civilization Revolution",
+      "aliases": [
+        "civilization revolution"
+      ],
+      "name_patterns": [
+        "civrev"
+      ],
+      "platform": "PS3"
     }
   ]
 }
