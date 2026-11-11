@@ -26,8 +26,14 @@
     status: ['active', 'quiet', 'stale', 'archived'],
     fork: ['yes', 'no'],
     type: TYPES.map((t) => t.label.toLowerCase()),
+    // reviewed: strong or medium
+    confidence: ['strong', 'medium', 'low', 'reviewed'],
   };
-  const FIELDS = ['game', 'repo', 'owner', 'author', 'category', 'status', 'type', 'toolkit', 'fork', 'time', 'stars'];
+  const FIELDS = ['game', 'repo', 'owner', 'author', 'category', 'status', 'type', 'toolkit', 'fork', 'confidence', 'time', 'stars'];
+  // How the collector named a repository's game (docs/export.md). weak is the old name for low.
+  const GAME_BASES = ['alias_name', 'alias_description', 'alias_readme_title', 'readme_title', 'inherited_from_parent', 'inherited_unverified_copy'];
+  const CONFIDENCES = ['strong', 'medium', 'low', 'weak', 'unknown'];
+  const HIDDEN_ROW = 'unreviewed names (hidden)';
   const TEXT_FIELDS = ['game', 'repo', 'owner', 'toolkit'];
   const SORT_KEYS = ['time', 'owner', 'author', 'game', 'category', 'status', 'stars', 'commits', 'first-seen', 'repos'];
   const GROUPS = ['none', 'game', 'owner', 'category', 'status', 'toolkit', 'type'];
@@ -42,7 +48,7 @@
 
   const HELP = {
     help: ['help [command]', 'list commands'],
-    filter: ['filter field:value ...', 'fields: game repo owner(author) category status type toolkit fork time stars. -field:value removes, "clear" resets'],
+    filter: ['filter field:value ...', 'fields: game repo owner(author) category status type toolkit fork confidence time stars. confidence: strong medium low reviewed (strong or medium) unknown. -field:value removes, "clear" resets'],
     sort: ['sort [-]key | key asc|desc', 'keys: time owner(author) game category status stars commits first-seen repos (games view). Leading - means descending'],
     group: ['group none|game|owner|category|status|toolkit|type', 'group rows under headings'],
     search: ['search text', 'match words in game, repo, owner, toolkit, summary; empty clears. Plain text typed at the prompt is a search too'],
@@ -53,6 +59,7 @@
     order: ['order newest|oldest', 'time order of the list'],
     scroll: ['scroll auto|manual', 'auto follows the newest edge; manual never moves your view'],
     untouched: ['untouched show|hide', 'forks with no stars and no commits in 30 days are hidden by default; typing a search shows them'],
+    lowconf: ['lowconf show|hide', 'games view: low-confidence game names (unreviewed README headings) are counted under "' + HIDDEN_ROW + '" by default; show lists them under their suggested names, labelled low'],
     view: ['view feed|table|forks|recent|games|about', 'also: feed, table, forks, recent, games, about as commands. recent lists repositories by when this collector first saw them; games has one row per game'],
     subscribe: ['subscribe', 'print the proposed RSS routes'],
     demo: ['demo [n|stop]', 'insert fictional demo events one by one (not real activity)'],
@@ -62,13 +69,13 @@
     reset: ['reset [view]', 'reset filters, view and settings; drop demo events. reset view only clears filters, search, sort and group of the current view'],
   };
   const EXAMPLES = {
-    filter: ['filter category:framework status:active', 'filter owner:example time:<7d', 'filter time:>7d stars:>10', 'filter fork:yes game:unknown'],
+    filter: ['filter category:framework status:active', 'filter owner:example time:<7d', 'filter time:>7d stars:>10', 'filter fork:yes game:unknown', 'filter confidence:reviewed'],
     sort: ['sort -time', 'sort author', 'sort stars desc'],
   };
   const COMMAND_NAMES = Object.keys(HELP).concat(['feed', 'table', 'forks', 'recent', 'games']).sort();
 
   function initialState() {
-    return { view: 'feed', filters: [], search: '', sort: { key: 'time', dir: 'desc' }, group: 'none', paused: false, scroll: 'auto', hideUntouched: true };
+    return { view: 'feed', filters: [], search: '', sort: { key: 'time', dir: 'desc' }, group: 'none', paused: false, scroll: 'auto', hideUntouched: true, hideLow: true };
   }
 
   // ---------- parsing ----------
@@ -235,6 +242,17 @@
     return now - last <= 30 * DAY ? 'active' : 'quiet';
   }
 
+  // The game fields of a repository. Feeds made before the alias list lack them: confidence is then unknown.
+  // A readme_title basis or the old weak confidence counts as low.
+  function gameFields(r) {
+    const game = str(r.game);
+    const basis = oneOf(r.game_basis, GAME_BASES);
+    let conf = oneOf(r.game_confidence, CONFIDENCES) || 'unknown';
+    if (conf === 'weak' || (game && basis === 'readme_title')) conf = 'low';
+    return { game, gameKey: game ? str(r.game_key) : null, gameBasis: basis, confidence: game && conf !== 'unknown' ? conf : null, matchedAlias: str(r.matched_alias) };
+  }
+  const isLow = (rec) => !!rec.game && rec.confidence === 'low';
+
   // Joins events with their repository into flat records for filtering.
   function joinData(data, now) {
     const events = Array.isArray(data.events) ? data.events : [];
@@ -244,13 +262,12 @@
       if (!typesByRepo.has(e.repo_id)) typesByRepo.set(e.repo_id, []);
       typesByRepo.get(e.repo_id).push(e.type);
     }
-    const repoRecs = repos.map((r) => ({
+    const repoRecs = repos.map((r) => Object.assign({
       kind: 'repo',
       id: String(r.id),
       repoId: r.id,
       repo: str(r.repo),
       owner: str(r.owner),
-      game: str(r.game),
       gameInferred: r.game_inferred !== false,
       gameInherited: r.game_inherited === true,
       category: oneOf(r.category, ENUMS.category),
@@ -272,11 +289,11 @@
       sample: r.sample === true,
       url: r.sample === true ? null : str(r.url),
       types: typesByRepo.get(r.id) || [],
-    }));
+    }, gameFields(r)));
     const byId = new Map(repoRecs.map((r) => [r.repoId, r]));
     const eventRecs = events.map((e) => {
       const r = byId.get(e.repo_id);
-      return Object.assign({}, r || { repo: null, owner: null, game: null, gameInferred: true, gameInherited: false, category: null, status: null, toolkit: null, fork: null, stars: null, commits: null, firstSeen: null }, {
+      return Object.assign({}, r || { repo: null, owner: null, game: null, gameKey: null, gameBasis: null, confidence: null, matchedAlias: null, gameInferred: true, gameInherited: false, category: null, status: null, toolkit: null, fork: null, stars: null, commits: null, firstSeen: null }, {
         kind: 'event',
         id: String(e.id),
         repoId: e.repo_id,
@@ -308,6 +325,7 @@
       if (t.value === 'unknown') return rec.types.length === 0;
       return rec.types.some((id) => typeMatches(t.value, id));
     }
+    if (t.field === 'confidence' && t.value === 'reviewed') return rec.confidence === 'strong' || rec.confidence === 'medium';
     if (t.field === 'time') {
       if (rec.time === null || rec.time === undefined) return t.kind === 'unknown';
       if (t.kind === 'unknown') return false;
@@ -375,10 +393,18 @@
     return sortRecords(base, sort);
   }
 
-  // How a row's game name was obtained, from its repositories: all inherited, all inferred, all
-  // not inferred, or mixed with the counts. A row with any inherited or inferred repository is never
-  // shown as plain.
-  const GAME_SOURCES = [['inherited', 'inherited / unverified'], ['inferred', 'inferred'], ['stated', 'not inferred']];
+  // How a row's game name was obtained, from its repositories: one source for all of them, or mixed
+  // with the counts. A row with any inherited, low or inferred repository is never shown as plain.
+  const GAME_SOURCES = [
+    ['low', 'unreviewed heading (low)'], ['inheritedLow', 'inherited / unverified (low)'], ['inherited', 'inherited / unverified'],
+    ['strong', 'reviewed alias (strong)'], ['medium', 'reviewed alias (medium)'], ['inferred', 'inferred'], ['stated', 'not inferred'],
+  ];
+  function gameSource(r) {
+    if (r.gameInherited) return isLow(r) ? 'inheritedLow' : 'inherited';
+    if (isLow(r)) return 'low';
+    if ((r.confidence === 'strong' || r.confidence === 'medium') && r.gameBasis) return r.confidence;
+    return r.gameInferred ? 'inferred' : 'stated';
+  }
   function gameSourceLabel(counts) {
     const parts = GAME_SOURCES.filter(([k]) => counts[k] > 0);
     if (parts.length === 0) return 'no game';
@@ -386,31 +412,48 @@
     return 'mixed: ' + parts.map(([k, text]) => counts[k] + ' ' + text).join(', ');
   }
 
-  // Games view: one row per game name (rec.game), repositories without a game in one unknown row.
-  // records: repository records after the view's filters. Each row: { game, unknown, label (see
+  // Games view: one row per game (rec.gameKey, or the name when there is no key), repositories without
+  // a game in one unknown row. With hideLow (the default) repositories whose name is low confidence are
+  // counted in one HIDDEN_ROW row after unknown instead of under a name. records: repository records after
+  // the view's filters. Each row: { game (the most common name of the key), unknown, hidden, label (see
   // gameSourceLabel), repos, forks, stars (sum of known stars, null when none is known), latest (the
   // repository with the newest commit, null when no time is known) }. Order: the sort key (repos,
-  // game, stars or time; any other key means repos descending), ties by game name; unknown is last.
-  function gamesRows(records, sort) {
+  // game, stars or time; any other key means repos descending), ties by game name; unknown, then hidden last.
+  function gamesRows(records, sort, hideLow) {
     const map = new Map();
+    // a record without a key joins the key another record of the same name has
+    const keyOf = new Map(records.filter((r) => r.game && r.gameKey).map((r) => [r.game, r.gameKey]));
     for (const r of records) {
+      const hidden = !!r.game && hideLow !== false && isLow(r);
       const unknown = !r.game;
-      const k = unknown ? '' : r.game;
-      if (!map.has(k)) map.set(k, { game: unknown ? 'unknown' : r.game, unknown, label: '', counts: { inherited: 0, inferred: 0, stated: 0 }, repos: 0, forks: 0, stars: null, latest: null });
+      const key = r.gameKey || keyOf.get(r.game);
+      const k = hidden ? 'h' : unknown ? 'u' : key ? 'k:' + key : 'n:' + r.game;
+      if (!map.has(k)) map.set(k, { game: hidden ? HIDDEN_ROW : 'unknown', unknown, hidden, label: '', names: new Map(), counts: {}, repos: 0, forks: 0, stars: null, latest: null });
       const g = map.get(k);
       g.repos += 1;
-      if (!unknown) g.counts[r.gameInherited ? 'inherited' : r.gameInferred ? 'inferred' : 'stated'] += 1;
+      if (!unknown) {
+        const src = gameSource(r);
+        g.counts[src] = (g.counts[src] || 0) + 1;
+        if (!hidden) g.names.set(r.game, (g.names.get(r.game) || 0) + 1);
+      }
       if (r.fork === true) g.forks += 1;
       if (Number.isFinite(r.stars)) g.stars = (g.stars || 0) + r.stars;
       if (Number.isFinite(r.time) && (g.latest === null || r.time > g.latest.time)) g.latest = r;
     }
-    for (const g of map.values()) g.label = gameSourceLabel(g.counts);
+    for (const g of map.values()) {
+      g.label = gameSourceLabel(g.counts);
+      // the most common spelling of the key names the row, ties by name
+      const best = [...g.names].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))[0];
+      if (best) g.game = best[0];
+      delete g.names;
+    }
+    const pin = (g) => (g.hidden ? 2 : g.unknown ? 1 : 0);
     const s = sort || { key: 'repos', dir: 'desc' };
     const val = { game: (g) => g.game.toLowerCase(), stars: (g) => g.stars, time: (g) => (g.latest ? g.latest.time : null) }[s.key] || ((g) => g.repos);
     const sign = s.key in { game: 1, stars: 1, time: 1, repos: 1 } && s.dir === 'asc' ? 1 : -1;
     const name = (g) => g.game.toLowerCase();
     return [...map.values()].sort((a, b) => {
-      if (a.unknown !== b.unknown) return a.unknown ? 1 : -1;
+      if (pin(a) !== pin(b)) return pin(a) - pin(b);
       const va = val(a);
       const vb = val(b);
       if (va !== vb) {
@@ -459,8 +502,8 @@
   const orUnknown = (v) => (v === null || v === undefined || v === '' ? 'unknown' : String(v));
   function gameLabel(rec) {
     if (!rec.game) return 'unknown';
-    if (rec.gameInherited) return rec.game + ' [inherited / unverified]';
-    return rec.game + (rec.gameInferred ? ' [inferred]' : '');
+    const src = gameSource(rec);
+    return rec.game + (src === 'stated' ? '' : ' [' + GAME_SOURCES.find(([k]) => k === src)[1] + ']');
   }
   function eventTime(t, now) {
     if (!Number.isFinite(t) || !Number.isFinite(now)) return '[unknown]';
@@ -482,6 +525,9 @@
     const lines = [(rec.kind === 'event' ? 'event ' : 'repository ') + rec.id + (rec.kind === 'event' ? '  ' + rec.typeLabel : '')];
     lines.push('repo: ' + orUnknown(rec.repo) + '   owner: ' + orUnknown(rec.owner));
     lines.push('game: ' + gameLabel(rec) + '   category: ' + orUnknown(rec.category));
+    if (rec.gameBasis || rec.confidence || rec.matchedAlias || rec.gameKey) {
+      lines.push('game key: ' + orUnknown(rec.gameKey) + '   basis: ' + orUnknown(rec.gameBasis) + '   confidence: ' + orUnknown(rec.confidence) + '   matched alias: ' + (rec.matchedAlias || 'none'));
+    }
     lines.push('status: ' + orUnknown(rec.status) + ' (observed activity only)   toolkit: ' + orUnknown(rec.toolkit));
     lines.push('fork: ' + (rec.fork === null ? 'unknown' : rec.fork ? 'yes' : 'no') + '   parent: ' + orUnknown(rec.parent) + '   root: ' + orUnknown(rec.root));
     lines.push('stars: ' + orUnknown(rec.stars) + '   commits 30d: ' + orUnknown(rec.commits) + '   first seen: ' + fmtTime(rec.firstSeen));
@@ -587,7 +633,7 @@
   }
 
   // True when filters, search, sort or group differ from the defaults of the current view.
-  // Pause, scroll and the untouched forks setting are not part of it.
+  // Pause, scroll and the untouched forks and low-confidence settings are not part of it.
   function viewChanged(state) {
     return state.filters.length > 0 || state.search !== '' || state.group !== initialState().group || sortLabel(state.sort) !== sortLabel(defaultSort(state.view));
   }
@@ -708,6 +754,12 @@
       s.hideUntouched = v === 'hide';
       o.push(ok('untouched forks: ' + (s.hideUntouched ? 'hidden' : 'shown')));
     },
+    lowconf(s, args, ctx, o) {
+      const v = (args[0] || '').toLowerCase();
+      if (v !== 'show' && v !== 'hide') return o.push(err('usage: lowconf show|hide'));
+      s.hideLow = v === 'hide';
+      o.push(ok('low-confidence names: ' + (s.hideLow ? 'hidden (games view: counted under "' + HIDDEN_ROW + '")' : 'shown (labelled low)')));
+    },
     subscribe(s, args, ctx, o) {
       o.push('Proposed RSS routes (not deployed, nothing to subscribe to yet):');
       ROUTES.forEach((r) => o.push('  ' + r));
@@ -726,7 +778,7 @@
     status(s, args, ctx, o) {
       (ctx.info || []).forEach((l) => o.push(l));
       o.push('view: ' + s.view + '  sort: ' + sortLabel(s.sort) + '  group: ' + s.group + '  filters: ' + activeSummary(s));
-      o.push('paused: ' + (s.paused ? 'yes' : 'no') + '  scroll: ' + s.scroll + '  untouched forks: ' + (s.hideUntouched ? 'hidden' : 'shown'));
+      o.push('paused: ' + (s.paused ? 'yes' : 'no') + '  scroll: ' + s.scroll + '  untouched forks: ' + (s.hideUntouched ? 'hidden' : 'shown') + '  low-confidence names: ' + (s.hideLow ? 'hidden' : 'shown'));
     },
     about(s, args, ctx, o) {
       s.view = 'about';
@@ -812,6 +864,7 @@
       case 'status':
       case 'fork':
       case 'type':
+      case 'confidence':
         return ENUMS[field].concat('unknown');
       case 'time':
         return ['<24h', '<7d', '<30d', '>7d', 'today', 'unknown'];
@@ -846,6 +899,9 @@
         return idx === 1 ? plain(['newest', 'oldest']) : [];
       case 'scroll':
         return idx === 1 ? plain(['auto', 'manual']) : [];
+      case 'untouched':
+      case 'lowconf':
+        return idx === 1 ? plain(['show', 'hide']) : [];
       case 'view':
         return idx === 1 ? plain(VIEWS) : [];
       case 'demo':
@@ -908,5 +964,6 @@
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
     orUnknown, gameLabel, eventTime, compareLabel, noticeText, collectionState, feedStale,
     emptyMessage, defaultSort, sortForView, viewChanged, resetView, sortRecent, RECENT_NOTE, gamesRows, githubSearchUrl, NO_MATCH_NOTE,
+    HIDDEN_ROW, isLow,
   };
 });

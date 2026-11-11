@@ -14,6 +14,9 @@
 // search and the About view.
 //   no-events - the real copy with its events emptied, as after a first collection: the feed view says
 //               there are no events yet and the table view still lists the repositories
+//   aliases   - the sample with the game fields of the alias list added (game_key, game_basis, game_confidence,
+//               matched_alias): the games view keys rows by game_key, counts low-confidence names under
+//               "unreviewed names (hidden)" until the low-confidence toggle shows them, labelled low
 // Usage: node tools/browser_check.mjs <chromium-binary> [--no-sandbox]
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -45,6 +48,26 @@ cpSync(realDir, noEventsDir, { recursive: true });
   writeFileSync(join(noEventsDir, 'data', 'feed.json'), JSON.stringify(f));
 }
 
+// the sample with the alias list's game fields; Sample Racer is spelled two ways under one key
+const aliasDir = join(work, 'aliases');
+cpSync(sampleDir, aliasDir, { recursive: true });
+{
+  const f = JSON.parse(readFileSync(join(aliasDir, 'data', 'feed.json'), 'utf8'));
+  const set = {
+    r1: ['example-game', 'alias_name', 'strong', 'example game'],
+    r7: ['example-game', 'inherited_from_parent', 'strong', 'example game'],
+    r2: ['sample-racer', 'alias_readme_title', 'medium', 'sample racer'],
+    r12: ['sample-racer', 'alias_description', 'medium', 'sample racer', 'SAMPLE RACER'],
+    r9: ['placeholder-tactics', 'readme_title', 'low', null],
+    r10: ['test-arena', null, 'weak', null],
+  };
+  for (const r of f.repos) {
+    const v = set[r.id] || [null, null, 'unknown', null];
+    Object.assign(r, { game_key: v[0], game_basis: v[1], game_confidence: v[2], matched_alias: v[3] }, v[4] ? { game: v[4] } : {});
+  }
+  writeFileSync(join(aliasDir, 'data', 'feed.json'), JSON.stringify(f));
+}
+
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.woff': 'font/woff', '.txt': 'text/plain; charset=utf-8' };
 function serve(dir) {
   const srv = createServer((req, res) => {
@@ -61,6 +84,7 @@ function serve(dir) {
 const sampleSrv = await serve(sampleDir);
 const realSrv = await serve(realDir);
 const noEventsSrv = await serve(noEventsDir);
+const aliasSrv = await serve(aliasDir);
 const chrome = spawn(bin, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank', ...flags], { stdio: 'ignore' });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -568,7 +592,58 @@ for (const [kind, page, search] of runs) {
   report[name] = r;
 }
 
-const origins = [[sampleSrv.origin, '<sample>'], [realSrv.origin, '<real>'], [noEventsSrv.origin, '<no-events>'], [pathToFileURL(realDir).href, '<real-file>']];
+// alias fields: rows keyed by game_key, low-confidence names hidden by default, the toggle shows them labelled low
+{
+  const name = 'aliases-desktop-1280x800';
+  await cmd('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await cmd('Page.navigate', { url: aliasSrv.origin + '/index.html' });
+  await sleep(1500);
+  const games = () => evalJs(`(() => ({
+    rows: [...document.querySelectorAll('#view tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent)),
+    count: document.getElementById('optcount').hidden ? '' : document.getElementById('optcount').textContent,
+    active: document.getElementById('active').textContent,
+    toggle: [...document.querySelectorAll('#toggles button')].map((b) => b.textContent).find((t) => t.startsWith('low-confidence')) || null,
+  }))()`);
+  await typeLine('untouched show');
+  await typeLine('view games');
+  const r = { hidden: await games() };
+  const row = (g, n) => (g.rows.find((x) => x[0] === n) || null);
+  const h = r.hidden;
+  check(h.toggle === 'low-confidence names: hidden' && h.count === '' && /low-confidence names: hidden/.test(h.active), name + ': toggle at start ' + JSON.stringify([h.toggle, h.count, h.active]));
+  check(h.rows.length && h.rows[h.rows.length - 1][0] === 'unreviewed names (hidden)' && h.rows[h.rows.length - 1][2] === '2', name + ': hidden row ' + JSON.stringify(h.rows));
+  check(!row(h, 'Placeholder Tactics') && !row(h, 'Test Arena'), name + ': a low-confidence name is shown as a game');
+  check(h.rows.filter((x) => /sample racer/i.test(x[0])).length === 1 && h.rows.some((x) => /sample racer/i.test(x[0]) && x[2] === '2' && x[1] === 'reviewed alias (medium)'), name + ': game_key does not join spellings ' + JSON.stringify(h.rows));
+  check((row(h, 'Example Game') || [])[1] === 'mixed: 2 inherited / unverified, 1 reviewed alias (strong)', name + ': Example Game label ' + JSON.stringify(row(h, 'Example Game')));
+  writeFileSync(join(shots, name + '-games.png'), Buffer.from((await cmd('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+  await evalJs("document.getElementById('options').open = true");
+  await evalJs("[...document.querySelectorAll('#toggles button')].find((b) => b.textContent.startsWith('low-confidence')).click()");
+  await sleep(200);
+  r.shown = await games();
+  const s = r.shown;
+  check(s.toggle === 'low-confidence names: shown' && s.count === '1 active' && /low-confidence names: shown/.test(s.active), name + ': toggle after click ' + JSON.stringify([s.toggle, s.count, s.active]));
+  check(!row(s, 'unreviewed names (hidden)') && (row(s, 'Placeholder Tactics') || [])[1] === 'unreviewed heading (low)' && (row(s, 'Test Arena') || [])[1] === 'unreviewed heading (low)', name + ': shown low rows ' + JSON.stringify(s.rows));
+  writeFileSync(join(shots, name + '-games-low-shown.png'), Buffer.from((await cmd('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+  await typeLine('sort stars');
+  await typeLine('reset view');
+  check((await games()).toggle === 'low-confidence names: shown', name + ': reset view changed the low-confidence setting');
+  await typeLine('reset');
+  check((await games()).toggle === 'low-confidence names: hidden', name + ': reset did not restore the low-confidence setting');
+  // details and the confidence filter
+  await typeLine('show r2');
+  r.details = await evalJs("[...document.querySelectorAll('#out div')].map((d) => d.textContent).find((t) => t.startsWith('game key:')) || null");
+  check(r.details === 'game key: sample-racer   basis: alias_readme_title   confidence: medium   matched alias: sample racer', name + ': details ' + JSON.stringify(r.details));
+  await typeLine('view table');
+  await typeLine('untouched show');
+  await typeLine('filter confidence:reviewed');
+  r.reviewed = await evalJs("[...document.querySelectorAll('#view tbody tr')].map((tr) => tr.children[0].textContent)");
+  check(r.reviewed.length === 4 && r.reviewed.every((t) => /reviewed alias|inherited/.test(t)), name + ': confidence:reviewed ' + JSON.stringify(r.reviewed));
+  await typeLine('filter -confidence:reviewed confidence:low');
+  r.low = await evalJs("[...document.querySelectorAll('#view tbody tr')].map((tr) => tr.children[0].textContent)");
+  check(r.low.length === 2 && r.low.every((t) => t.endsWith('[unreviewed heading (low)]')), name + ': confidence:low ' + JSON.stringify(r.low));
+  report[name] = r;
+}
+
+const origins = [[aliasSrv.origin, '<aliases>'], [sampleSrv.origin, '<sample>'], [realSrv.origin, '<real>'], [noEventsSrv.origin, '<no-events>'], [pathToFileURL(realDir).href, '<real-file>']];
 console.log('requests:', JSON.stringify([...new Set(requests)].map((u) => origins.reduce((s, [o, n]) => s.replace(o, n), u))));
 check(requests.every((u) => origins.some(([o]) => u.startsWith(o)) || u === 'about:blank'), 'a request left the local copies');
 console.log('problems (console errors/warnings, CSP violations, failed requests):', problems.length ? '\n  ' + problems.join('\n  ') : 'none');
@@ -581,5 +656,6 @@ rmSync(profile, { recursive: true, force: true });
 sampleSrv.srv.close();
 realSrv.srv.close();
 noEventsSrv.srv.close();
+aliasSrv.srv.close();
 rmSync(work, { recursive: true, force: true });
 process.exit(problems.length || fails.length ? 1 : 0);

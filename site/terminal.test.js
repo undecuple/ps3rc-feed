@@ -737,7 +737,7 @@ test('games rows follow the untouched forks rule and cover every repository of t
   const forks = T.gamesRows(repos).reduce((n, g) => n + g.forks, 0);
   assert.equal(forks, repos.filter((r) => r.fork === true).length);
   const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
-  assert.ok(app.includes('T.gamesRows(repos, state.sort)') && app.includes("Repositories: 'repos'"));
+  assert.ok(app.includes('T.gamesRows(repos, state.sort, state.hideLow)') && app.includes("Repositories: 'repos'"));
   // one row per game name across the sample
   const names = T.gamesRows(repos).map((g) => g.game);
   assert.equal(new Set(names).size, names.length);
@@ -801,4 +801,125 @@ test('reset view: shown only when the view differs from its defaults, and clears
   assert.equal(run('reset nope', s).out[0].kind, 'error');
   assert.deepEqual(run('reset nope', s).state, s);
   assert.deepEqual(T.complete('reset v', ctx), { line: 'reset view ', options: [] });
+});
+
+// ---------- alias list fields: game_key, game_basis, game_confidence, matched_alias ----------
+
+const aliasRepo = (id, game, key, basis, conf, alias, extra) =>
+  Object.assign({ id, repo: 'o/' + id, owner: 'o', game, game_key: key, game_basis: basis, game_confidence: conf, matched_alias: alias, game_inferred: true, game_inherited: false, fork: false, stars: 1 }, extra);
+const aliasFeed = {
+  generated_at: '2026-11-10T00:00:00Z',
+  events: [{ id: 'e1', type: 'commits_observed', repo_id: 'a1', observed_at: '2026-11-09T00:00:00Z' }],
+  repos: [
+    aliasRepo('a1', 'Alpha Quest', 'alpha-quest', 'alias_name', 'strong', 'alpha quest'),
+    aliasRepo('a2', 'ALPHA QUEST', 'alpha-quest', 'alias_readme_title', 'medium', 'alpha quest'),
+    aliasRepo('a3', 'Alpha Quest', 'alpha-quest', 'inherited_from_parent', 'strong', 'alpha quest', { game_inherited: true, fork: true }),
+    aliasRepo('b1', 'Beta Heading', 'beta-heading', 'readme_title', 'low', null),
+    aliasRepo('b2', 'Old Heading', null, null, 'weak', null),
+    aliasRepo('b3', 'Beta Heading', 'beta-heading', 'inherited_from_parent', 'low', null, { game_inherited: true, fork: true }),
+    aliasRepo('c1', null, null, null, 'unknown', null),
+    // malformed values: unknown basis and confidence, a key that is not text
+    aliasRepo('m1', 'Odd Name', 42, 'guess', 'certain', ['x']),
+  ],
+};
+const aliasRecs = T.joinData(aliasFeed, Date.parse(aliasFeed.generated_at));
+const byId = (id) => aliasRecs.repos.find((r) => r.id === id);
+
+test('joinData reads the alias fields, and treats missing or malformed ones as unknown', () => {
+  assert.deepEqual(['gameKey', 'gameBasis', 'confidence', 'matchedAlias'].map((k) => byId('a2')[k]), ['alpha-quest', 'alias_readme_title', 'medium', 'alpha quest']);
+  assert.equal(byId('b1').confidence, 'low');
+  assert.equal(byId('b2').confidence, 'low'); // the old weak
+  assert.equal(byId('c1').confidence, null);
+  assert.deepEqual(['gameKey', 'gameBasis', 'confidence', 'matchedAlias'].map((k) => byId('m1')[k]), [null, null, null, null]);
+  // a readme_title basis is low whatever the confidence says
+  assert.equal(T.joinData({ repos: [aliasRepo('x', 'X', 'x', 'readme_title', 'strong', null)] }, 0).repos[0].confidence, 'low');
+  // the sample (and the live feed before the next refresh) has none of the fields
+  assert.ok(repos.every((r) => r.gameKey === null && r.gameBasis === null && r.confidence === null && r.matchedAlias === null));
+  // events carry their repository's fields
+  assert.equal(aliasRecs.events[0].confidence, 'strong');
+});
+
+test('table labels say reviewed alias, unreviewed heading or inherited', () => {
+  assert.equal(T.gameLabel(byId('a1')), 'Alpha Quest [reviewed alias (strong)]');
+  assert.equal(T.gameLabel(byId('a2')), 'ALPHA QUEST [reviewed alias (medium)]');
+  assert.equal(T.gameLabel(byId('a3')), 'Alpha Quest [inherited / unverified]');
+  assert.equal(T.gameLabel(byId('b1')), 'Beta Heading [unreviewed heading (low)]');
+  assert.equal(T.gameLabel(byId('b3')), 'Beta Heading [inherited / unverified (low)]');
+  assert.equal(T.gameLabel(byId('m1')), 'Odd Name [inferred]');
+  assert.equal(T.gameLabel(repos[0]), 'Example Game [inferred]');
+});
+
+test('confidence filter: strong medium low reviewed unknown, completion, help', () => {
+  const f = (text) => ids(aliasRecs.repos.filter((r) => T.matches(r, filt(text), '', 0)));
+  assert.deepEqual(f('confidence:strong'), ['a1', 'a3']);
+  assert.deepEqual(f('confidence:medium'), ['a2']);
+  assert.deepEqual(f('confidence:reviewed'), ['a1', 'a2', 'a3']);
+  assert.deepEqual(f('confidence:low'), ['b1', 'b2', 'b3']);
+  assert.deepEqual(f('confidence:unknown'), ['c1', 'm1']);
+  assert.deepEqual(f('confidence:strong confidence:low'), ['a1', 'a3', 'b1', 'b2', 'b3']);
+  assert.equal(run('filter confidence:sure').out[0].kind, 'error');
+  // -field:value removes the term, as for every field
+  let s = run('filter confidence:low category:game').state;
+  s = run('filter -confidence:low', s).state;
+  assert.deepEqual(s.filters.map((x) => x.raw), ['category:game']);
+  assert.equal(run('confidence:reviewed').state.filters[0].raw, 'confidence:reviewed');
+  assert.equal(T.liveSearchText('confidence:low'), null);
+  assert.deepEqual(T.complete('filter confidence:re', ctx), { line: 'filter confidence:reviewed ', options: [] });
+  assert.ok(T.complete('filter conf', ctx).line.endsWith('confidence:'));
+  assert.match(run('help filter').out[0].text, /confidence: strong medium low reviewed/);
+  // the sample has no confidence: everything is unknown
+  assert.equal(shown(repos, filt('confidence:unknown')).length, repos.length);
+});
+
+test('games rows: keyed by game_key, low-confidence names hidden by default and labelled low when shown', () => {
+  const hidden = T.gamesRows(aliasRecs.repos);
+  assert.deepEqual(hidden.map((g) => [g.game, g.label, g.repos]), [
+    ['Alpha Quest', 'mixed: 1 inherited / unverified, 1 reviewed alias (strong), 1 reviewed alias (medium)', 3],
+    ['Odd Name', 'inferred', 1],
+    ['unknown', 'no game', 1],
+    [T.HIDDEN_ROW, 'mixed: 2 unreviewed heading (low), 1 inherited / unverified (low)', 3],
+  ]);
+  assert.equal(T.HIDDEN_ROW, 'unreviewed names (hidden)');
+  assert.deepEqual(T.gamesRows(aliasRecs.repos, null, true), hidden);
+  // the hidden row stays last in every order
+  assert.equal(T.gamesRows(aliasRecs.repos, { key: 'game', dir: 'desc' }).pop().game, T.HIDDEN_ROW);
+  const shownRows = T.gamesRows(aliasRecs.repos, null, false);
+  assert.deepEqual(shownRows.map((g) => [g.game, g.label, g.repos]), [
+    ['Alpha Quest', 'mixed: 1 inherited / unverified, 1 reviewed alias (strong), 1 reviewed alias (medium)', 3],
+    ['Beta Heading', 'mixed: 1 unreviewed heading (low), 1 inherited / unverified (low)', 2],
+    ['Odd Name', 'inferred', 1],
+    ['Old Heading', 'unreviewed heading (low)', 1],
+    ['unknown', 'no game', 1],
+  ]);
+  // a low row is never labelled as a plain or reviewed name
+  assert.ok(shownRows.filter((g) => /Heading/.test(g.game)).every((g) => /\(low\)/.test(g.label)));
+  // repositories without a key join the key of their name
+  const mixed = T.gamesRows([byId('a1'), Object.assign({}, byId('a1'), { id: 'z', gameKey: null, game: 'Alpha Quest' })]);
+  assert.deepEqual(mixed.map((g) => [g.game, g.repos]), [['Alpha Quest', 2]]);
+  // without the fields, rows are keyed by name as before and nothing is hidden
+  assert.equal(T.gamesRows(repos).some((g) => g.hidden), false);
+});
+
+test('lowconf toggle: default hidden, kept by reset view, restored by reset; status and completion', () => {
+  assert.equal(T.initialState().hideLow, true);
+  const r = run('lowconf show');
+  assert.equal(r.state.hideLow, false);
+  assert.match(r.out[0].text, /^low-confidence names: shown/);
+  assert.equal(run('lowconf maybe').out[0].kind, 'error');
+  assert.equal(run('lowconf hide', r.state).state.hideLow, true);
+  assert.equal(T.viewChanged(r.state), false);
+  assert.equal(run('reset view', r.state).state.hideLow, false);
+  assert.equal(run('reset', r.state).state.hideLow, true);
+  assert.match(run('status', r.state).out.pop().text, /low-confidence names: shown$/);
+  assert.deepEqual(T.complete('lowconf s', ctx), { line: 'lowconf show ', options: [] });
+  assert.ok(T.COMMAND_NAMES.includes('lowconf'));
+  assert.ok(run('help').out.some((l) => l.text.startsWith('lowconf show|hide')));
+});
+
+test('details show the game key, basis, confidence and matched alias when present', () => {
+  const lines = T.showLines(byId('a2'), 0).map((l) => (typeof l === 'string' ? l : l.text));
+  assert.ok(lines.includes('game key: alpha-quest   basis: alias_readme_title   confidence: medium   matched alias: alpha quest'));
+  assert.ok(lines.includes('game: ALPHA QUEST [reviewed alias (medium)]   category: unknown'));
+  // a feed without the fields has no such line
+  assert.ok(!T.showLines(repos[0], NOW).some((l) => typeof l === 'string' && l.startsWith('game key:')));
 });

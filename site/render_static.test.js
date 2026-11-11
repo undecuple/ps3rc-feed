@@ -127,3 +127,14 @@ test('the committed feed renders', () => {
   const html = R.render(feed, Date.parse(feed.generated_at));
   assert.ok(rows(html) > 0 && rows(html) <= R.CAP);
 });
+
+test('low-confidence game names are marked unreviewed, reviewed aliases say so', () => {
+  const html = R.render(feedOf([
+    repo(1, { game: 'Heading Name', game_key: 'heading-name', game_basis: 'readme_title', game_confidence: 'low' }),
+    repo(2, { game: 'Old Heading', game_confidence: 'weak' }),
+    repo(3, { game: 'Real Title', game_key: 'real-title', game_basis: 'alias_name', game_confidence: 'strong', matched_alias: 'real title' }),
+  ]), NOW);
+  assert.ok(html.includes('<td>Heading Name [unreviewed heading (low)]</td>'));
+  assert.ok(html.includes('<td>Old Heading [unreviewed heading (low)]</td>'));
+  assert.ok(html.includes('<td>Real Title [reviewed alias (strong)]</td>'));
+});

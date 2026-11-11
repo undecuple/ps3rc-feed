@@ -328,14 +328,15 @@
   function gamesView(repos) {
     const wrap = el('div', 'tablewrap');
     const table = el('table');
-    table.append(el('caption', null, 'Games (one row per game name; Label says how the name was obtained; repositories without a game are counted under unknown)'));
+    table.append(el('caption', null, 'Games (one row per game; Label says how the name was obtained; repositories without a game are counted under unknown' +
+      (state.hideLow ? ', and those named only by an unreviewed heading under "' + T.HIDDEN_ROW + '" (lowconf show lists them)' : '; low-confidence names are shown, labelled low') + ')'));
     const tr0 = el('tr');
     ['Game', 'Label', 'Repositories', 'Forks', 'Most recent repository', 'Latest commit', 'Total stars'].forEach((h) => tr0.append(sortHead('th', h)));
     const thead = el('thead');
     thead.append(tr0);
     table.append(thead);
     const tbody = el('tbody');
-    for (const g of T.gamesRows(repos, state.sort)) {
+    for (const g of T.gamesRows(repos, state.sort, state.hideLow)) {
       const tr = el('tr');
       cell(tr, g.game);
       cell(tr, g.label);
@@ -367,7 +368,7 @@
     add('h2', 'Status values');
     add('p', 'Statuses describe observed activity only: active (activity in the last 30 days), quiet (older), stale (collection is failing), archived. They say nothing about whether a project works. unknown means missing, never zero.');
     add('h2', 'Fork and game labels');
-    add('p', 'Fork ancestry, inferred game and detected toolkit are separate. A game inherited from a parent is shown as inherited / unverified. Ahead/behind is relative to a recorded ref and time. The games view has one row per game name, and its Label column says whether the name was inherited, inferred, not inferred, or mixed, with counts.');
+    add('p', 'Fork ancestry, inferred game and detected toolkit are separate. A game inherited from a parent is shown as inherited / unverified. Ahead/behind is relative to a recorded ref and time. The games view has one row per game, and its Label column says whether the name was a reviewed alias (strong or medium), an unreviewed heading (low), inherited, inferred, not inferred, or mixed, with counts. Low-confidence names are counted under "' + T.HIDDEN_ROW + '" unless lowconf show is set.');
     add('h2', 'Keys');
     add('p', 'Type commands at the prompt (help lists them). Tab completes, Up/Down recall history, Esc clears the line, Ctrl+L clears output, / focuses the prompt.');
     return d;
@@ -457,7 +458,7 @@
     return b;
   }
 
-  const QUICK_FILTERS = ['category:framework', 'category:game', 'category:tool', 'category:unclassified', 'status:active', 'status:quiet', 'status:stale', 'status:archived', 'fork:yes', 'time:<24h', 'time:<7d', 'toolkit:ps3recomp'];
+  const QUICK_FILTERS = ['category:framework', 'category:game', 'category:tool', 'category:unclassified', 'status:active', 'status:quiet', 'status:stale', 'status:archived', 'fork:yes', 'confidence:reviewed', 'confidence:low', 'time:<24h', 'time:<7d', 'toolkit:ps3recomp'];
   const QUICK_SORTS = ['time', 'stars', 'commits', 'owner', 'game', 'first-seen'];
   const DESC_FIRST = ['time', 'stars', 'commits', 'first-seen', 'repos'];
 
@@ -479,6 +480,7 @@
       chip(state.paused ? 'resume' : 'pause', () => run(state.paused ? 'resume' : 'pause'), state.paused),
       chip('scroll: ' + state.scroll, () => run('scroll ' + (state.scroll === 'auto' ? 'manual' : 'auto'))),
       chip('untouched forks: ' + (state.hideUntouched ? 'hidden' : 'shown'), () => run('untouched ' + (state.hideUntouched ? 'show' : 'hide')), !state.hideUntouched),
+      chip('low-confidence names: ' + (state.hideLow ? 'hidden' : 'shown'), () => run('lowconf ' + (state.hideLow ? 'show' : 'hide')), !state.hideLow),
       chip('demo', () => run('demo')),
     );
     $('filter-chips').replaceChildren(...QUICK_FILTERS.map((f) => {
@@ -492,10 +494,12 @@
       return chip(label, () => run('sort ' + next + k), on);
     }));
 
-    const active = state.filters.length + (state.search ? 1 : 0);
+    // a non-default low-confidence setting counts as active, so the closed options say it is on
+    const active = state.filters.length + (state.search ? 1 : 0) + (state.hideLow ? 0 : 1);
+    const lowNote = state.view === 'games' || !state.hideLow ? ' | low-confidence names: ' + (state.hideLow ? 'hidden' : 'shown') : '';
     $('optcount').hidden = active === 0;
     $('optcount').textContent = active + ' active';
-    $('active').textContent = 'filters: ' + T.activeSummary(state) + ' | sort: ' + T.sortLabel(state.sort) + ' | group: ' + state.group + (state.view === 'about' ? '' : ' | ' + count + ' of ' + total + ' shown' + (hidden ? ' (' + hidden + ' untouched forks hidden)' : ''));
+    $('active').textContent = 'filters: ' + T.activeSummary(state) + ' | sort: ' + T.sortLabel(state.sort) + ' | group: ' + state.group + (state.view === 'about' ? '' : ' | ' + count + ' of ' + total + ' shown' + (hidden ? ' (' + hidden + ' untouched forks hidden)' : '')) + lowNote;
     $('reset-view').hidden = !T.viewChanged(state);
 
     const msg = state.paused ? held.length + ' new events held (paused)' : unseen > 0 ? unseen + ' new events (scrolled away)' : announce;
