@@ -197,6 +197,11 @@ def build_parser():
     exp.add_argument("--state-in", help="saved state (.json under data/) to apply the runs on top of, instead of an empty store")
     exp.add_argument("--state-out", help="write the resulting state here (.json under data/); may equal --state-in with --overwrite")
     exp.add_argument(
+        "--config",
+        help="sources config: every repository its deny list names (roots and include entries excepted) is removed "
+        "from the state, with its events, before and after the runs are applied",
+    )
+    exp.add_argument(
         "--stale-after-minutes",
         type=int,
         help="set the feed's stale_after_minutes (%d-%d); omitted from the feed when not given" % (MIN_STALE_MINUTES, MAX_STALE_MINUTES),
@@ -524,7 +529,16 @@ def run_export(args):
     write can leave a new feed.json without a manifest; rerunning with
     --overwrite repairs it (with --state-in equal to --state-out, rerun from
     a copy of the previous state, or wait for the next run).
+
+    With --config, export.prune_denied removes the repositories the config
+    denies from the loaded state before the runs are applied, so the runs
+    resolve every association without them and no new event refers to
+    them (a fork that inherited its game from one gets the usual
+    game_association_changed). It runs again after the runs, for a run made
+    with an older config that lists one again; the associations are then
+    resolved once more. Without --config nothing is removed.
     """
+    sources = collect.load_config(args.config) if args.config is not None else None
     feed_path, manifest_path = resolve_export_targets(args.out_dir, overwrite=args.overwrite)
     state_out = resolve_state_output(args.state_out, overwrite=args.overwrite) if args.state_out is not None else None
     stale_minutes = _check_stale_minutes(args.stale_after_minutes)
@@ -560,8 +574,17 @@ def run_export(args):
         )
     runs = [run for run, _ in loaded]
     config = events.Config()
+    removed = set()
+    if sources is not None:
+        removed.update(export.prune_denied(state, sources))
     for run in runs:
         events.apply_run(state, run, config)
+    if sources is not None:
+        late = export.prune_denied(state, sources)
+        if late:
+            # A run listed a denied repository again: drop what its forks inherited from it in that run.
+            forks.resolve_associations(state["repositories"], config.aliases)
+            removed.update(late)
     state_bytes = None
     if state_out is not None:
         schema.validate_state(state)
@@ -576,17 +599,18 @@ def run_export(args):
     write_run_file(feed, feed_path, overwrite=args.overwrite, flag="--out-dir")
     write_run_file(manifest, manifest_path, overwrite=args.overwrite, flag="--out-dir")
     written += [os.path.relpath(feed_path, REPO_ROOT), os.path.relpath(manifest_path, REPO_ROOT)]
-    _print(
-        {
-            "written": written,
-            "runs": len(runs),
-            "generated_at": feed["generated_at"],
-            "version": manifest["version"],
-            "repos": len(feed["repos"]),
-            "events": len(feed["events"]),
-            "events_in_store": len(state["events"]),
-        }
-    )
+    payload = {
+        "written": written,
+        "runs": len(runs),
+        "generated_at": feed["generated_at"],
+        "version": manifest["version"],
+        "repos": len(feed["repos"]),
+        "events": len(feed["events"]),
+        "events_in_store": len(state["events"]),
+    }
+    if sources is not None:
+        payload["denied_removed"] = len(removed)
+    _print(payload)
     return EXIT_OK
 
 

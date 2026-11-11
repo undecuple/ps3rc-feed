@@ -107,11 +107,12 @@ jobs:
         run: |
           if [ "$STATE_EXISTS" = "true" ]; then
             python3 -B -m collector export --runs data/run.json --out-dir data/site --overwrite \
-              --state-in data/state.json --state-out data/state.json --stale-after-minutes 1500
+              --state-in data/state.json --state-out data/state.json --stale-after-minutes 1500 \
+              --config config/sources.json
           else
             # First run: no saved state, so the run is applied to an empty store (a baseline).
             python3 -B -m collector export --runs data/run.json --out-dir data/site \
-              --state-out data/state.json --stale-after-minutes 1500
+              --state-out data/state.json --stale-after-minutes 1500 --config config/sources.json
           fi
           version=$(python3 -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' data/site/manifest.json)
           case "$version" in

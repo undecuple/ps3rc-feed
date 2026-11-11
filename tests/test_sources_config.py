@@ -414,7 +414,22 @@ class CommittedConfig(CollectorTestCase):
             ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true", "ps3recomp in:readme fork:true", "killzone in:name", "helghast in:name", "helghast in:description"],
         )
         self.assertEqual([collect.query_kind(q) for q in c["queries"]].count("code"), 0)
-        self.assertEqual((c["include"], c["deny"]), ([], {"repositories": [], "owners": []}))
+        self.assertEqual(c["include"], [])
+        # Unrelated repositories the removed "killzone in:description" search had found; export --config drops them.
+        self.assertEqual(
+            c["deny"],
+            {
+                "repositories": [
+                    "SonyWWS/ATF",
+                    "SayaAfnan-elc/xau-fusion",
+                    "MarkusZoppelt/kzsf-stats",
+                    "appsoluut/kz3stats",
+                    "headassbtw/Mantle",
+                    "Tzeentchnet/psp-recomp",
+                ],
+                "owners": [],
+            },
+        )
         self.assertEqual((c["max_requests"], c["max_repositories"], c["commit_window_days"], c["readme_bytes"]), (800, 190, 30, 16384))
         self.assertEqual(c["page_caps"], {"search": 3, "code": 1, "forks": 10, "commits": 3})
         self.assertEqual(collect.config_uses_example_names(c), [])

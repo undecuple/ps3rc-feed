@@ -31,6 +31,9 @@ state into the records site/app.js and site/terminal.js read:
   game_confidence (strong and medium for config/games.json alias matches,
   low for an unreviewed README heading, which the page may hide) and
   matched_alias (the alias or name pattern that matched, or null).
+- Given the sources config (export --config), prune_denied removes the
+  repositories its deny list names, with their events, from the state
+  before and after the runs are applied.
 - Nothing is flagged sample.
 - generated_at is the newest applied run's run_at, never the wall clock.
 - The newest MAX_FEED_EVENTS events are kept (the page keeps the same
@@ -46,7 +49,7 @@ then given the rest gives the same feed as all the runs from scratch.
 import hashlib
 import html
 
-from . import catalog, text
+from . import catalog, collect, text
 
 MAX_FEED_EVENTS = 500
 MAX_FEED_REPOS = 2000
@@ -108,6 +111,51 @@ def _event_record(event):
         "observed_at": event["observed_at"],
         "summary": plain(event["summary"]),
     }
+
+
+def prune_denied(state, config):
+    """Drop every repository the config denies from the state, in place. Returns the removed ids, sorted.
+
+    A repository is denied by its stored full_name with collect.is_denied
+    (the rule collect applies to candidates); the config's roots and
+    include ids never are. A denied repository loses its observation,
+    every event whose repository_id is its id, and its id in the stored
+    search and root-scan listings and in pending_repository_ids, so it is
+    not in the feed, the saved state or the next history append (older
+    history lines stay as they were). With nothing denied the state is not
+    touched; a second call removes nothing.
+
+    A tracked fork of a denied repository stays tracked, as collect would
+    still fetch it: deny names repositories and owners, not networks. Its
+    own facts as GitHub reports them (is_fork, parent and network root ids,
+    comparison, first sight) are kept, since the next run reports them
+    again; with the parent gone they are what a fork of any untracked
+    parent has, and the feed's parent and root names become null. A game or
+    toolkit it inherited from the denied repository is dropped when the
+    associations are next resolved (events.apply_run, or the caller after
+    the last run; see cli.run_export). Other repositories' events that
+    mention it are their own history and are kept.
+    """
+    exempt = set(r["repository_id"] for r in config["roots"] + config.get("include", []))
+    repositories = state["repositories"]
+    denied = sorted(
+        obs["repository_id"]
+        for obs in repositories.values()
+        if obs["repository_id"] not in exempt and collect.is_denied(obs["full_name"], config["deny"])
+    )
+    if not denied:
+        return []
+    gone = set(denied)
+    for rid in denied:
+        del repositories[str(rid)]
+    state["events"] = [e for e in state["events"] if e["repository_id"] not in gone]
+    col = state["collection"]
+    for search in col["searches"].values():
+        search["repository_ids"] = [i for i in search["repository_ids"] if i not in gone]
+    for root in col["roots"].values():
+        root["found_repository_ids"] = [i for i in root["found_repository_ids"] if i not in gone]
+    col["pending_repository_ids"] = [i for i in col["pending_repository_ids"] if i not in gone]
+    return denied
 
 
 def _newest_first(event):

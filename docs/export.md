@@ -20,6 +20,11 @@
   first, then `feed.json`, then `manifest.json`. If a later write fails, the page keeps the previous feed, the next
   export from the saved state publishes this run, and repeating this run is refused instead of being applied twice.
 - `--state-in` and `--state-out` may name the same file only with `--overwrite`.
+- `--config config/sources.json` removes every repository its `deny` list names (roots and `include` ids excepted)
+  from the state, with its events and its ids in the stored search and fork listings, before and after the runs are
+  applied. A tracked fork of a denied repository stays (deny names repositories and owners, not networks): it keeps
+  the parent id GitHub reports, its feed `parent` becomes `null`, and a game or toolkit inherited from the denied
+  repository is dropped. Without `--config` nothing is removed; the refresh workflow always passes it.
 - Every repository record carries `game` (the title), `game_key`, `game_basis`, `game_confidence` and
   `matched_alias`. The basis is `alias_name`, `alias_description` or `alias_readme_title` for a match in
   `config/games.json` (confidence `strong`, `strong`, `medium`), `readme_title` for an unreviewed README heading
