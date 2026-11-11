@@ -96,6 +96,10 @@ FEED_REPO = schema.Obj(
         "url": schema.Str(pattern=schema.SOURCE_URL_RE, max_len=schema.MAX_FULL_NAME + 32),
         "description": schema.Nullable(_PLAIN),
         "game": schema.Nullable(_PLAIN),
+        "game_key": schema.Nullable(schema.GAME_KEY),
+        "game_basis": schema.Nullable(schema.Enum(schema.GAME_BASES)),
+        "game_confidence": schema.Enum(schema.GAME_CONFIDENCE),
+        "matched_alias": schema.Nullable(schema.MATCHED_ALIAS),
         "game_inferred": schema.Bool(),
         "game_inherited": schema.Bool(),
         "category": schema.Nullable(schema.Enum(CATEGORIES)),
@@ -112,7 +116,9 @@ FEED_REPO = schema.Obj(
         "last_commit_at": schema.Nullable(_TS),
         "archived": schema.Nullable(schema.Bool()),
         "collection_failing": schema.Bool(),
-    }
+    },
+    # Feeds exported before config/games.json have no game_key, game_basis, game_confidence or matched_alias.
+    optional=("game_key", "game_basis", "game_confidence", "matched_alias"),
 )
 
 _EVENT_FIELDS = {

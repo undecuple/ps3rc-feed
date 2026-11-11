@@ -1,0 +1,74 @@
+{
+  "_comment": "Reviewed game aliases. Change only through a reviewed pull request; see README, 'Game aliases'. Aliases match whole tokens of the repository name, then the description, then the README title; name_patterns match the whole repository name, '*' standing for one token.",
+  "games": [
+    {
+      "key": "god-of-war-ascension",
+      "title": "God of War: Ascension",
+      "aliases": ["gow ascension", "god of war ascension", "ascension-r"],
+      "platform": "PS3"
+    },
+    {
+      "key": "drakengard-3",
+      "title": "Drakengard 3",
+      "aliases": ["dod3", "drakengard 3"],
+      "platform": "PS3"
+    },
+    {
+      "key": "infamous-2",
+      "title": "inFAMOUS 2",
+      "aliases": ["infamous 2"],
+      "platform": "PS3"
+    },
+    {
+      "key": "infamous",
+      "title": "inFAMOUS",
+      "aliases": ["infamous"],
+      "platform": "PS3"
+    },
+    {
+      "key": "demons-souls",
+      "title": "Demon's Souls",
+      "aliases": ["demon's souls", "demons souls"],
+      "platform": "PS3"
+    },
+    {
+      "key": "gran-turismo-5-prologue",
+      "title": "Gran Turismo 5 Prologue",
+      "aliases": ["gran turismo 5 prologue", "gt5p"],
+      "platform": "PS3"
+    },
+    {
+      "key": "saints-row-2",
+      "title": "Saints Row 2",
+      "aliases": ["saints row 2", "saintsrow2"],
+      "platform": "PS3"
+    },
+    {
+      "key": "resistance-fall-of-man",
+      "title": "Resistance: Fall of Man",
+      "aliases": ["resistance fall of man"],
+      "name_patterns": ["resistance-recomp"],
+      "platform": "PS3"
+    },
+    {
+      "key": "resistance-2",
+      "title": "Resistance 2",
+      "aliases": ["resistance 2"],
+      "platform": "PS3"
+    },
+    {
+      "key": "red-dead-redemption",
+      "title": "Red Dead Redemption",
+      "aliases": ["red dead redemption"],
+      "name_patterns": ["rdr-recomp"],
+      "platform": "PS3"
+    },
+    {
+      "key": "guitar-hero-iii",
+      "title": "Guitar Hero III",
+      "aliases": ["guitar hero iii", "guitar hero 3"],
+      "name_patterns": ["gh3"],
+      "platform": "PS3"
+    }
+  ]
+}

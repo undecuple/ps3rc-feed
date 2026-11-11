@@ -195,16 +195,92 @@ def plausible_title(value):
     return all(ch.isalnum() or ch in _TITLE_PUNCT for ch in value)
 
 
-def readme_title(readme_excerpt):
-    """First level-1/2 Markdown heading of the README excerpt, if it is a plausible title."""
+def has_cjk(value):
+    """True when value holds a Han, kana or Hangul character (such a heading is not taken as a title)."""
+    return any(any(lo <= ord(ch) <= hi for lo, hi in _CJK_RANGES) for ch in value)
+
+
+_CJK_RANGES = ((0x1100, 0x11FF), (0x2E80, 0x9FFF), (0xA960, 0xA97F), (0xAC00, 0xD7FF), (0xF900, 0xFAFF), (0xFF66, 0xFF9F), (0x20000, 0x3FFFF))
+_DASHES = ("\u2014", "\u2013")
+# Words that say what was done to a game or where it runs. A ", " / ": " / " - " clause made of
+# text holding one of them is a description, not part of the title.
+DESCRIPTIVE_WORDS = frozenset(
+    [
+        "port", "ported", "recomp", "recompiled", "recompilation", "recompiler", "decomp", "decompilation",
+        "native", "pc", "windows", "linux", "macos", "mac", "ipad", "static", "statically", "unofficial",
+        "experimental", "experiment", "wip", "progress", "research", "emulator", "emulation", "playable",
+        "x86", "x64", "arm64",
+    ]
+)
+
+
+def _words(value):
+    return [w for w in _SLUG_RE.split(fold(value).lower()) if w]
+
+
+# A "for <platform>" tail and dangling connector words are cut from the end ("Killzone for Windows" -> "Killzone").
+PLATFORM_WORDS = frozenset(["windows", "pc", "mac", "linux", "macos", "android", "ps3"])
+CONNECTOR_WORDS = frozenset(["for", "in", "on", "of", "the", "and", "with", "from", "to", "a", "an"])
+
+
+def _strip_suffixes(value):
+    """Drop trailing parentheticals, RESTATED_SUFFIXES words, "for <platform>" tails and dangling
+    CONNECTOR_WORDS ("Foo (PS3) Native PC Port" -> "Foo", "Foo HD for Windows" -> "Foo HD")."""
+    for _ in range(MAX_TITLE):
+        value = value.rstrip(" :,-")
+        if value.endswith(")") and "(" in value:
+            value = value[: value.rfind("(")]
+            continue
+        cut = value.rfind(" ")
+        last = value[cut + 1 :].lower()
+        if cut != -1 and last in RESTATED_SUFFIXES and not set(_words(value[:cut])) <= RESTATED_SUFFIXES:
+            value = value[:cut]
+            continue
+        before = value[:cut].rstrip()
+        if cut != -1 and last in PLATFORM_WORDS and before.lower().endswith(" for"):
+            value = before[:-4]
+            continue
+        if cut != -1 and last in CONNECTOR_WORDS:
+            value = before
+            continue
+        return value
+    return value
+
+
+def clean_title(value):
+    """The game-naming part of a heading: before an em/en dash, without restated suffixes,
+    and before a ", " / ": " / " - " clause whose rest is descriptive. Linear passes only."""
+    for dash in _DASHES:
+        if dash in value:
+            value = value[: value.find(dash)]
+    value = _strip_suffixes(value.strip())
+    for sep in (", ", ": ", " - "):
+        at = value.find(sep)
+        if at > 0 and any(w in DESCRIPTIVE_WORDS for w in _words(value[at + len(sep) :])):
+            value = _strip_suffixes(value[:at])
+    return value.strip()
+
+
+def readme_heading(readme_excerpt):
+    """First level-1/2 Markdown heading of the README excerpt as plain text, uncleaned and unchecked."""
     if not readme_excerpt:
         return None
     for line in readme_excerpt.splitlines():
         heading = heading_text(line)
         if heading is not None:
-            title = plain_text(heading, MAX_TITLE)
-            return title if plausible_title(title) else None
+            return plain_text(heading, MAX_TITLE)
     return None
+
+
+def readme_title(readme_excerpt):
+    """readme_heading, cleaned (clean_title), if it is then a plausible title without CJK characters."""
+    heading = readme_heading(readme_excerpt)
+    if heading is None:
+        return None
+    title = clean_title(heading)
+    if title != heading and len(title) < 2:
+        return None  # cleaning left a stub ("X for Windows" -> "X")
+    return title if plausible_title(title) and not has_cjk(title) else None
 
 
 # Headings that name a README section, never a game. Compared as slugs, so
@@ -216,10 +292,32 @@ GENERIC_HEADINGS = frozenset(
         "getting-started", "quick-start", "quickstart", "license", "changelog",
         "description", "build", "building", "requirements", "project-structure",
         "notes", "links", "credits", "screenshots", "demo", "download", "status",
+        "setup", "list", "lists", "tools", "tool", "scripts", "examples", "example", "faq", "help", "wiki",
+        "roadmap", "contributing", "support", "disclaimer", "warning", "summary", "home", "index", "todo",
+        "o-que-e", "what-is-this", "what-is-it", "que-es", "sobre", "projeto", "proyecto",
     ]
 )
+# A heading starting with one of these asks a question or opens a section ("What is ...", "O que é ...").
+GENERIC_PREFIXES = ("what-is-", "o-que-e-", "que-es-", "how-to-", "about-")
+# A heading holding one of these words names a tool or a collection, not a game.
+GENERIC_WORDS = frozenset(
+    ["emulator", "emulators", "bucket", "trending", "launcher", "launchers", "engine", "framework", "sdk", "toolkit", "toolchain", "dotfiles"]
+)
 # Trailing words that only say what was done to a game, not which game.
-RESTATED_SUFFIXES = frozenset(["recomp", "recompiled", "recompilation", "port", "pc", "native", "ps3"])
+RESTATED_SUFFIXES = frozenset(["recomp", "recompiled", "recompilation", "port", "pc", "native", "ps3", "windows", "linux", "macos"])
+
+
+def fold(value):
+    """NFKD with combining marks dropped ("O que é" -> "O que e"), for comparisons only."""
+    return "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch))
+
+
+def generic_heading(title):
+    """True when title names a README section, a question, a tool or a list rather than a game."""
+    key = slug(fold(title)) or ""
+    if key in GENERIC_HEADINGS or key.startswith(GENERIC_PREFIXES):
+        return True
+    return any(word in GENERIC_WORDS for word in key.split("-"))
 
 
 def _core(key):
@@ -230,7 +328,7 @@ def _core(key):
     return "-".join(words)
 
 
-def game_title(repo_name, title):
+def game_title(repo_name, title, raw=None):
     """title when it can name a game in repository repo_name, else None.
 
     A title is rejected when any of these hold (all on text.slug forms):
@@ -241,51 +339,63 @@ def game_title(repo_name, title):
       what is left is non-empty and equals the repository-name slug
       ("Haze PC Port" in haze). A title made only of those words is not
       rejected by this rule.
+    The last two rules also apply to raw, the heading before clean_title,
+    so "Haze Recomp" in haze-recomp (cleaned to "Haze") is still rejected.
     Only the title is trimmed, so a shorter title stays: "Skyfall" in
-    skyfall-recomp is kept. Slugs keep word breaks, so "Drakengard 3
-    Recompiled" (core drakengard-3) in drakengard3-port stays a game.
+    skyfall-recomp is kept. Slugs keep word breaks, so "Firefall 3
+    Recompiled" (core firefall-3) in firefall3-port stays a game.
     """
     key = slug(title)
     name_key = slug(repo_name) or ""
-    if key is None or key in GENERIC_HEADINGS:
+    if key is None or generic_heading(title):
         return None
     if key.startswith("awesome") or name_key.startswith("awesome"):
         return None
-    if key == name_key:
-        return None
-    core = _core(key)
-    if core and core == name_key:
-        return None
+    for value in (key, slug(raw) if raw is not None else None):
+        if value is None:
+            continue
+        if value == name_key:
+            return None
+        core = _core(value)
+        if core and core == name_key:
+            return None
     return title
 
 
-def classify(full_name, description, readme_excerpt):
+def classify(full_name, description, readme_excerpt, aliases=None):
     """Heuristic category, inferred game and toolkit for a repository.
 
     Returns (category, game, toolkit) where game and toolkit are the dicts
     stored in the observation. Everything here is an automated guess and is
-    always marked inferred and unverified. The game title is the first
-    README heading when game_title accepts it.
+    always marked inferred and unverified. The reviewed alias list
+    (collector.games, config/games.json) is tried first: repository name,
+    description, README title, first hit wins; a hit gives the entry's key
+    and title, basis alias_name / alias_description (confidence strong) or
+    alias_readme_title (medium), and matched_alias. Otherwise the first
+    README heading, when game_title accepts it, is used with basis
+    readme_title and confidence low: unreviewed, and hidden by default.
     """
-    name = full_name.split("/", 1)[1].lower()
-    haystack = " ".join(x for x in (name, description or "", readme_excerpt or "")).lower()
+    from . import games
+
+    if aliases is None:
+        aliases = games.default()
+    name = full_name.split("/", 1)[1]
+    haystack = " ".join(x for x in (name.lower(), description or "", readme_excerpt or "")).lower()
     toolkit_name = "ps3recomp" if "ps3recomp" in haystack else None
     toolkit = {"name": toolkit_name, "confidence": "weak" if toolkit_name else "unknown"}
 
-    unknown = {"key": None, "title": None, "basis": None, "confidence": "unknown", "inferred": True, "verified": False}
-    if "ps3recomp" in name:
+    unknown = {"key": None, "title": None, "basis": None, "confidence": "unknown", "inferred": True, "verified": False, "matched_alias": None}
+    if "ps3recomp" in name.lower():
         return "framework", unknown, toolkit
 
-    title = game_title(name, readme_title(readme_excerpt))
+    heading = readme_title(readme_excerpt)
+    hit = aliases.match(name, description, heading)
+    if hit is not None:
+        entry, basis, matched = hit
+        game = dict(unknown, key=entry["key"], title=entry["title"], basis=basis, confidence=games.CONFIDENCE[basis], matched_alias=matched)
+        return "game", game, toolkit
+    title = game_title(name.lower(), heading, readme_heading(readme_excerpt))
     key = slug(title)
     if key:
-        game = {
-            "key": key,
-            "title": title,
-            "basis": "readme_title",
-            "confidence": "weak",
-            "inferred": True,
-            "verified": False,
-        }
-        return "game", game, toolkit
+        return "game", dict(unknown, key=key, title=title, basis="readme_title", confidence="low"), toolkit
     return "unclassified", unknown, toolkit

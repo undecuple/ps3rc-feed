@@ -42,17 +42,20 @@ plan and the review findings):
 
 import copy
 
-from . import forks, model, schema, text
+from . import forks, games, model, schema, text
 from .store import get_observation, put_observation
 
 MAX_AFFECTED_LISTED = 100
 
 
 class Config:
-    def __init__(self, stale_threshold=3):
+    """stale_threshold: failures before collection_stale. aliases: a games.Games (default config/games.json)."""
+
+    def __init__(self, stale_threshold=3, aliases=None):
         if not isinstance(stale_threshold, int) or isinstance(stale_threshold, bool) or stale_threshold < 1:
             raise ValueError("stale_threshold must be a positive integer")
         self.stale_threshold = stale_threshold
+        self.aliases = aliases if aliases is not None else games.default()
 
 
 class RunOrderError(ValueError):
@@ -700,6 +703,7 @@ def _game_change_event(obs, previous, run_at):
         "basis": basis,
         "inherited_from": obs["game"]["inherited_from"],
         "confidence": obs["game"]["confidence"],
+        "matched_alias": obs["game"]["matched_alias"],
         "inferred": True,
         "verified": False,
     }
@@ -740,14 +744,29 @@ def _inherited_change_event(cause, affected, run_at):
     )
 
 
-def _association_events(repositories, previous_games, previous_text, origin, run_touched, run_at):
-    """Direct changes one per repository; inheritance-caused changes aggregated per cause."""
+def _association_events(repositories, previous_games, previous_text, origin, run_touched, run_at, list_before):
+    """Direct changes one per repository; inheritance-caused changes aggregated per cause.
+
+    Re-labelling by the reviewed alias list (config/games.json) is silent:
+    a change is announced only when the game key differs and both this run
+    and the previous one used the alias list (list_before: the state
+    records the list's fingerprint). So the first run after the list was
+    introduced announces nothing, and a repository that moves from a README
+    heading (or nothing) onto an alias match is not announced either: the
+    list was reviewed, the repository did nothing. A different spelling of
+    the same key is never a change. A move between two keys, including off
+    an alias match, is.
+    """
     emitted = []
     by_cause = {}
+    if not list_before:
+        return emitted
     for rid, previous in previous_games.items():
         obs = repositories[rid]
         game = obs["game"]
         if game["key"] == previous["key"]:
+            continue
+        if previous.get("matched_alias") is None and game["matched_alias"] is not None:
             continue
         own_text_changed = rid in run_touched and previous_text[rid] != (obs["readme_excerpt"], obs["description"])
         cause = None
@@ -776,6 +795,7 @@ def _apply(state, run, config):
         if not run["repositories"]:
             _record_collection(state, run)
             state["last_run_at"] = run_at
+            state["games_list"] = config.aliases.fingerprint
             return []
         baseline_run = True
         state["baseline_done"] = True
@@ -810,7 +830,9 @@ def _apply(state, run, config):
 
     # Ancestry state, inferred game and toolkit for every observation, with
     # inheritance from resolved tracked ancestors (bounded walk, loops detected).
-    origin = forks.resolve_associations(repositories)
+    origin = forks.resolve_associations(repositories, config.aliases)
+    list_before = state.get("games_list") is not None
+    state["games_list"] = config.aliases.fingerprint
 
     new_set = set(new_ids)
     # A new repository's own history is its baseline: only announce it.
@@ -832,7 +854,7 @@ def _apply(state, run, config):
         for obs in fork_events:
             related = model.discovered_event_id(obs["repository_id"]) if obs["repository_id"] in new_set else None
             emitted.append(_fork_discovered_event(repositories, obs, run_at, related))
-        emitted.extend(_association_events(repositories, previous_games, previous_text, origin, run_touched, run_at))
+        emitted.extend(_association_events(repositories, previous_games, previous_text, origin, run_touched, run_at, list_before))
 
     _record_collection(state, run)
     state["last_run_at"] = run_at
