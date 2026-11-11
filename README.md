@@ -30,7 +30,7 @@ real time, and the page shows its own collection time. The last collection may b
 
 ## What exists
 
-- **Live page** in `site/`: a feed, a catalog table and a fork view, with filters, search, sorting by clicking a column
+- **Live page** in `site/`: a feed, a catalog table, a fork view, a recent view and a games view, with filters, search, sorting by clicking a column
   heading, a stars column, and headings that stay visible while scrolling. Forks with no stars and no recent commits are hidden until you search or switch them on. Details are in `site/README.md`.
   If the page misses a repository, a reviewed change to the config adds a search term or an include entry, and a later collection picks it up.
 - **Collector** in `collector/`: a Python standard-library program, developed and tested on Python 3.14. It makes

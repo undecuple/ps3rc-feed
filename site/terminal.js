@@ -29,9 +29,9 @@
   };
   const FIELDS = ['game', 'repo', 'owner', 'author', 'category', 'status', 'type', 'toolkit', 'fork', 'time', 'stars'];
   const TEXT_FIELDS = ['game', 'repo', 'owner', 'toolkit'];
-  const SORT_KEYS = ['time', 'owner', 'author', 'game', 'category', 'status', 'stars', 'commits', 'first-seen'];
+  const SORT_KEYS = ['time', 'owner', 'author', 'game', 'category', 'status', 'stars', 'commits', 'first-seen', 'repos'];
   const GROUPS = ['none', 'game', 'owner', 'category', 'status', 'toolkit', 'type'];
-  const VIEWS = ['feed', 'table', 'forks', 'recent', 'about'];
+  const VIEWS = ['feed', 'table', 'forks', 'recent', 'games', 'about'];
   const ROUTES = [
     '/feed.xml',
     '/feeds/frameworks/ps3recomp.xml',
@@ -43,7 +43,7 @@
   const HELP = {
     help: ['help [command]', 'list commands'],
     filter: ['filter field:value ...', 'fields: game repo owner(author) category status type toolkit fork time stars. -field:value removes, "clear" resets'],
-    sort: ['sort [-]key | key asc|desc', 'keys: time owner(author) game category status stars commits first-seen. Leading - means descending'],
+    sort: ['sort [-]key | key asc|desc', 'keys: time owner(author) game category status stars commits first-seen repos (games view). Leading - means descending'],
     group: ['group none|game|owner|category|status|toolkit|type', 'group rows under headings'],
     search: ['search text', 'match words in game, repo, owner, toolkit, summary; empty clears. Plain text typed at the prompt is a search too'],
     show: ['show <id>', 'details of an event (e..) or repository (r..)'],
@@ -53,7 +53,7 @@
     order: ['order newest|oldest', 'time order of the list'],
     scroll: ['scroll auto|manual', 'auto follows the newest edge; manual never moves your view'],
     untouched: ['untouched show|hide', 'forks with no stars and no commits in 30 days are hidden by default; typing a search shows them'],
-    view: ['view feed|table|forks|recent|about', 'also: feed, table, forks, recent, about as commands. recent lists repositories by when this collector first saw them'],
+    view: ['view feed|table|forks|recent|games|about', 'also: feed, table, forks, recent, games, about as commands. recent lists repositories by when this collector first saw them; games has one row per game'],
     subscribe: ['subscribe', 'print the proposed RSS routes'],
     demo: ['demo [n|stop]', 'insert fictional demo events one by one (not real activity)'],
     status: ['status', 'feed freshness and current settings'],
@@ -65,7 +65,7 @@
     filter: ['filter category:framework status:active', 'filter owner:example time:<7d', 'filter time:>7d stars:>10', 'filter fork:yes game:unknown'],
     sort: ['sort -time', 'sort author', 'sort stars desc'],
   };
-  const COMMAND_NAMES = Object.keys(HELP).concat(['feed', 'table', 'forks', 'recent']).sort();
+  const COMMAND_NAMES = Object.keys(HELP).concat(['feed', 'table', 'forks', 'recent', 'games']).sort();
 
   function initialState() {
     return { view: 'feed', filters: [], search: '', sort: { key: 'time', dir: 'desc' }, group: 'none', paused: false, scroll: 'auto', hideUntouched: true };
@@ -375,6 +375,52 @@
     return sortRecords(base, sort);
   }
 
+  // How a row's game name was obtained, from its repositories: all inherited, all inferred, all
+  // not inferred, or mixed with the counts. A row with any inherited or inferred repository is never
+  // shown as plain.
+  const GAME_SOURCES = [['inherited', 'inherited / unverified'], ['inferred', 'inferred'], ['stated', 'not inferred']];
+  function gameSourceLabel(counts) {
+    const parts = GAME_SOURCES.filter(([k]) => counts[k] > 0);
+    if (parts.length === 0) return 'no game';
+    if (parts.length === 1) return parts[0][1];
+    return 'mixed: ' + parts.map(([k, text]) => counts[k] + ' ' + text).join(', ');
+  }
+
+  // Games view: one row per game name (rec.game), repositories without a game in one unknown row.
+  // records: repository records after the view's filters. Each row: { game, unknown, label (see
+  // gameSourceLabel), repos, forks, stars (sum of known stars, null when none is known), latest (the
+  // repository with the newest commit, null when no time is known) }. Order: the sort key (repos,
+  // game, stars or time; any other key means repos descending), ties by game name; unknown is last.
+  function gamesRows(records, sort) {
+    const map = new Map();
+    for (const r of records) {
+      const unknown = !r.game;
+      const k = unknown ? '' : r.game;
+      if (!map.has(k)) map.set(k, { game: unknown ? 'unknown' : r.game, unknown, label: '', counts: { inherited: 0, inferred: 0, stated: 0 }, repos: 0, forks: 0, stars: null, latest: null });
+      const g = map.get(k);
+      g.repos += 1;
+      if (!unknown) g.counts[r.gameInherited ? 'inherited' : r.gameInferred ? 'inferred' : 'stated'] += 1;
+      if (r.fork === true) g.forks += 1;
+      if (Number.isFinite(r.stars)) g.stars = (g.stars || 0) + r.stars;
+      if (Number.isFinite(r.time) && (g.latest === null || r.time > g.latest.time)) g.latest = r;
+    }
+    for (const g of map.values()) g.label = gameSourceLabel(g.counts);
+    const s = sort || { key: 'repos', dir: 'desc' };
+    const val = { game: (g) => g.game.toLowerCase(), stars: (g) => g.stars, time: (g) => (g.latest ? g.latest.time : null) }[s.key] || ((g) => g.repos);
+    const sign = s.key in { game: 1, stars: 1, time: 1, repos: 1 } && s.dir === 'asc' ? 1 : -1;
+    const name = (g) => g.game.toLowerCase();
+    return [...map.values()].sort((a, b) => {
+      if (a.unknown !== b.unknown) return a.unknown ? 1 : -1;
+      const va = val(a);
+      const vb = val(b);
+      if (va !== vb) {
+        if (va === null || vb === null) return va === null ? 1 : -1;
+        return (va < vb ? -1 : 1) * sign;
+      }
+      return name(a) < name(b) ? -1 : name(a) > name(b) ? 1 : 0;
+    });
+  }
+
   function groupValue(rec, field) {
     const v = field === 'type' ? rec.typeLabel : rec[field];
     return v === undefined || v === '' ? null : v;
@@ -529,7 +575,7 @@
 
   const RECENT_NOTE = 'First seen by this collector. Repositories first listed in a baseline collection all share one time, and the date is not when the repository was created.';
 
-  // Message for a view with no rows to show (feed, table, forks, recent). total: rows of this view before filters;
+  // Message for a view with no rows to show (feed, table, forks, recent, games). total: rows of this view before filters;
   // repoCount: repositories in the feed. The About view always has content, so it gets null.
   function emptyMessage(view, total, repoCount) {
     if (view === 'about') return null;
@@ -662,11 +708,15 @@
       const v = (args[0] || '').toLowerCase();
       if (!VIEWS.includes(v)) return o.push(err('usage: view ' + VIEWS.join('|')));
       // Entering the recent view with the default sort switches to newest first seen first.
+      // Entering the games view with the default sort switches to most repositories first, and
+      // leaving it with the repos sort (which only orders games) goes back to the default.
       // Any other sort the user picked is kept.
-      const recentSort = v === 'recent' && s.view !== 'recent' && s.sort.key === 'time' && s.sort.dir === 'desc';
-      if (recentSort) s.sort = { key: 'first-seen', dir: 'desc' };
+      if (v !== 'games' && s.sort.key === 'repos') s.sort = initialState().sort;
+      const viewSort = { recent: 'first-seen', games: 'repos' }[v];
+      const switched = !!viewSort && s.view !== v && s.sort.key === 'time' && s.sort.dir === 'desc';
+      if (switched) s.sort = { key: viewSort, dir: 'desc' };
       s.view = v;
-      o.push(ok('view: ' + v + (recentSort ? '  sort: ' + sortLabel(s.sort) : '')));
+      o.push(ok('view: ' + v + (switched ? '  sort: ' + sortLabel(s.sort) : '')));
     },
     clear(s, args, ctx, o, fx) {
       fx.push({ type: 'clear' });
@@ -681,6 +731,7 @@
   COMMANDS.table = (s, a, c, o) => COMMANDS.view(s, ['table'], c, o);
   COMMANDS.forks = (s, a, c, o) => COMMANDS.view(s, ['forks'], c, o);
   COMMANDS.recent = (s, a, c, o) => COMMANDS.view(s, ['recent'], c, o);
+  COMMANDS.games = (s, a, c, o) => COMMANDS.view(s, ['games'], c, o);
 
   // Forks with no stars and no recent commits are noise in a list; a typed search always sees them.
   function dropUntouched(items, state) {
@@ -825,6 +876,6 @@
     deriveStatus, joinData, matches, dropUntouched, sortRecords, groupRecords, execute, complete,
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
     orUnknown, gameLabel, eventTime, compareLabel, noticeText, collectionState, feedStale,
-    emptyMessage, sortRecent, RECENT_NOTE, githubSearchUrl, NO_MATCH_NOTE,
+    emptyMessage, sortRecent, RECENT_NOTE, gamesRows, githubSearchUrl, NO_MATCH_NOTE,
   };
 });
