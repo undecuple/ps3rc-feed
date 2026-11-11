@@ -38,39 +38,6 @@
       ]
     },
     {
-      "q": "killzone in:description",
-      "require_any": [
-        "shadow fall",
-        "killzone 1",
-        "killzone 2",
-        "killzone 3",
-        "killzone 4",
-        "liberation",
-        "mercenary",
-        "mercenaries",
-        "guerrilla",
-        "helghast",
-        "helghan",
-        "ps2",
-        "ps3",
-        "ps4",
-        "ps vita",
-        "psvita",
-        "playstation",
-        "psp",
-        "kz2",
-        "kz3",
-        "kz4",
-        "kzsf",
-        "emulator",
-        "recomp",
-        "decomp",
-        "video game",
-        "videogame",
-        "videojuego"
-      ]
-    },
-    {
       "q": "helghast in:name",
       "require_any": [
         "shadow fall",

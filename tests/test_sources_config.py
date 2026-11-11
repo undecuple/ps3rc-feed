@@ -411,7 +411,7 @@ class CommittedConfig(CollectorTestCase):
         self.assertEqual(c["queries"][:3], ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true", "ps3recomp in:readme fork:true"])
         self.assertEqual(
             list(self.terms),
-            ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true", "ps3recomp in:readme fork:true", "killzone in:name", "killzone in:description", "helghast in:name", "helghast in:description"],
+            ["ps3recomp in:name fork:true", "ps3recomp in:description fork:true", "ps3recomp in:readme fork:true", "killzone in:name", "helghast in:name", "helghast in:description"],
         )
         self.assertEqual([collect.query_kind(q) for q in c["queries"]].count("code"), 0)
         self.assertEqual((c["include"], c["deny"]), ([], {"repositories": [], "owners": []}))
@@ -428,9 +428,9 @@ class CommittedConfig(CollectorTestCase):
         code = kinds.count("code") * c["page_caps"]["code"]
         self.assertLessEqual(searches, 30)  # one minute of the search bucket
         self.assertLessEqual(code, 10)  # one minute of the code search bucket
-        # 7 x 3 + 1 x 10 = 31 fixed; + 4 x 190 = 791 <= 800.
+        # 6 x 3 + 1 x 10 = 28 fixed; + 4 x 190 = 788 <= 800.
         fixed = searches + code + len(c["roots"]) * c["page_caps"]["forks"]
-        self.assertEqual((searches, code, fixed), (21, 0, 31))
+        self.assertEqual((searches, code, fixed), (18, 0, 28))
         self.assertLessEqual(fixed + 4 * c["max_repositories"], c["max_requests"])
         self.assertLessEqual(c["max_requests"], 800)
 
@@ -450,12 +450,12 @@ class CommittedConfig(CollectorTestCase):
 
         code, out, err = _run_cli(["collect", "--config", SOURCES])
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(json.loads(out)["plan"]), 9)
+        self.assertEqual(len(json.loads(out)["plan"]), 8)
         self.assertNotIn("skipped_code_queries", json.loads(out))
         code, out, err = _run_cli(["collect", "--config", SOURCES, "--anonymous"])
         self.assertEqual(code, 0, err)
         payload = json.loads(out)
-        self.assertEqual(len(payload["plan"]), 9)
+        self.assertEqual(len(payload["plan"]), 8)
         self.assertNotIn("/search/code", [p["path"] for p in payload["plan"]])
 
     def test_only_the_game_queries_are_filtered_and_never_by_their_own_word(self):
@@ -463,8 +463,7 @@ class CommittedConfig(CollectorTestCase):
         self.assertIsNone(self.terms["ps3recomp in:description fork:true"])
         # Repository search items carry no README text, so a readme query cannot be filtered.
         self.assertIsNone(self.terms["ps3recomp in:readme fork:true"])
-        for query in ("killzone in:name", "killzone in:description"):
-            self.assertNotIn("killzone", [t.casefold() for t in self.terms[query]])
+        self.assertNotIn("killzone", [t.casefold() for t in self.terms["killzone in:name"]])
         for query in ("helghast in:name", "helghast in:description"):
             self.assertFalse([t for t in self.terms[query] if "helghast" in t.casefold() or t.casefold() in "helghast"])
 
@@ -473,7 +472,6 @@ class CommittedConfig(CollectorTestCase):
 
         for query, keep, drop in (
             ("killzone in:name", KILLZONE_KEEP, KILLZONE_DROP),
-            ("killzone in:description", KILLZONE_KEEP, KILLZONE_DROP),
             ("helghast in:name", HELGHAST_KEEP, HELGHAST_DROP),
             ("helghast in:description", HELGHAST_KEEP, HELGHAST_DROP),
         ):
