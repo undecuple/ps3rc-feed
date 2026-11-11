@@ -510,7 +510,7 @@
     else if (c.complete) parts.push('The last collection was complete.');
     else {
       parts.push('The last collection was incomplete, so some entries and numbers may be missing.');
-      if (c.notFetched !== null) parts.push('Repositories not fetched: ' + c.notFetched + '.');
+      if (c.notFetched !== null) parts.push('Repositories not fetched: ' + c.notFetched + (c.notFetched > 0 ? ' (they keep their previous values and are tried again later).' : '.'));
       if (c.errors !== null) parts.push('Errors: ' + c.errors + '.');
     }
     if (feedStale(feed, now)) parts.push('This data is older than ' + staleMinutes(feed) + ' minutes and may be out of date.');
