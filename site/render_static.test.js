@@ -39,7 +39,7 @@ test('hostile names are escaped and never become markup or links', () => {
   assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;&quot;&#39;&amp;'));
   const links = hrefs(html).filter((h) => h.startsWith('https://github.com/owner'));
   assert.deepEqual(links, ['https://github.com/owner1/repo1']);
-  for (const h of hrefs(html)) assert.ok(/^(https:\/\/github\.com\/|style\.css$|favicon\.svg$|index\.html$)/.test(h), h);
+  for (const h of hrefs(html)) assert.ok(/^(https:\/\/github\.com\/|style\.css$|favicon\.svg$|index\.html$|feed\.atom$)/.test(h), h);
   assert.ok(!/ on[a-z]+=/i.test(html));
   assert.ok(!/style=/i.test(html));
 });
