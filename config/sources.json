@@ -112,7 +112,14 @@
   ],
   "include": [],
   "deny": {
-    "repositories": [],
+    "repositories": [
+      "SonyWWS/ATF",
+      "SayaAfnan-elc/xau-fusion",
+      "MarkusZoppelt/kzsf-stats",
+      "appsoluut/kz3stats",
+      "headassbtw/Mantle",
+      "Tzeentchnet/psp-recomp"
+    ],
     "owners": []
   },
   "commit_window_days": 30,

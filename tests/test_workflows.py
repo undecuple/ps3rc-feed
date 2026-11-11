@@ -359,6 +359,19 @@ def check_history_job(text):
     return problems
 
 
+def check_export_config(text):
+    """Every export call in the Export step passes the reviewed config, so its deny list prunes the saved state."""
+    _, steps = split_steps(jobs(text).get("collect", []))
+    export = [step for step in steps if step_name(step) == "Export"]
+    if len(export) != 1:
+        return ["collect has no single Export step"]
+    body = "\n".join(export[0])
+    calls = body.count("-m collector export ")
+    if calls != 2 or body.count("--config config/sources.json") != calls:
+        return ["Export step does not pass --config config/sources.json to every export call"]
+    return []
+
+
 def refresh_problems(text):
     return (
         check_pinned(text)
@@ -374,6 +387,7 @@ def refresh_problems(text):
         + check_triggers(text)
         + check_publish_guard(text)
         + check_history_job(text)
+        + check_export_config(text)
     )
 
 
@@ -510,6 +524,9 @@ MUTATIONS = [
     ("guard reads the wrong file", '["stopped"]; print("" if s is None else s)\' data/run.json', '["stopped"]; print("" if s is None else s)\' data/old.json'),
     ("publish-state without size check", 'cp site/data/feed.json "$work/check/feed.json"', 'true'),
     ("no timeout", "    timeout-minutes: 10\n", ""),
+    ("export without config", " --stale-after-minutes 1500 \\\n              --config config/sources.json\n", " --stale-after-minutes 1500\n"),
+    ("first export without config", " --stale-after-minutes 1500 --config config/sources.json\n", " --stale-after-minutes 1500\n"),
+    ("export with another config", "--stale-after-minutes 1500 --config config/sources.json", "--stale-after-minutes 1500 --config config/sources.example.json"),
     ("zero minute", '"17 */6 * * *"', '"0 */6 * * *"'),
     ("every hour", '"17 */6 * * *"', '"17 * * * *"'),
     ("persisted credentials", "          ref: main\n          persist-credentials: false\n", "          ref: main\n"),

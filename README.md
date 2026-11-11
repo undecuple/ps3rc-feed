@@ -129,6 +129,9 @@ never values from the file.
 - `deny`: `{"repositories": ["owner/name", ...], "owners": ["login", ...]}`, matched case-insensitively against the
   name the listing gave, before anything is fetched. Denied ids are left out of the run's listings and counted in
   `collection_report.denied`. Roots and included repositories cannot be denied (the config is refused).
+  `export --config` also removes a denied repository and its events from the saved state and the feed, so a
+  repository found before it was denied leaves the page and the next history append; the history archive keeps the
+  lines already written.
 - `max_requests`, `max_repositories`, `commit_window_days`, `readme_bytes`, `page_caps` (`search`, `code` (1 to 3,
   default 1), `forks`, `commits` pages per listing): the budget. A repository costs about four requests; candidates are
   fetched in the fetch order below and those past `max_repositories` are reported as not fetched.
