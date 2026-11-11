@@ -4,10 +4,9 @@ name: refresh
 # Nothing runs unless the repository variable REFRESH_ENABLED is 'true'.
 #
 # Request budget: one run makes at most 800 collector requests (--max-requests 800, also the config's
-# max_requests) plus 1 smoke request, so at most 801 requests. Four runs a day are at most 3,204 requests a
-# day. Scheduled runs are 6 hours apart and never overlap (concurrency below), so one hour holds at most one
-# of them, under the built-in token's 1,000 requests an hour. A run started by hand adds up to 801 more; the
-# collector stops on a rate limit.
+# max_requests). Four runs a day are at most 3,200 requests a day. Scheduled runs are 6 hours apart and never
+# overlap (concurrency below), so one hour holds at most one of them, under the built-in token's 1,000
+# requests an hour. A run started by hand adds up to 800 more; the collector stops on a rate limit.
 #
 # Publishing guard: the collect job fails, after printing the reason, when the run stopped for anything but
 # the request budget (rate_limited, search_rate_limited, code_search_rate_limited, network) or the exported
@@ -83,29 +82,6 @@ jobs:
           fi
           mkdir -p data
           cp feed-state/state.json data/state.json
-      - name: Smoke check code search
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # One request. Prints only the HTTP status, a word and three rate limit header values; the body goes to /dev/null.
-          headers="$RUNNER_TEMP/smoke.headers"
-          code=$(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" | curl -s -o /dev/null -D "$headers" -w '%{http_code}' \
-            --max-time 30 -H 'Accept: application/vnd.github+json' -H @- \
-            'https://api.github.com/search/code?q=filename%3Aps3recomp-LICENSE.txt&per_page=1') || code=000
-          case "$code" in
-            200) word="ok" ;;
-            401|403) word="auth error" ;;
-            422) word="validation error" ;;
-            429) word="rate limited" ;;
-            *) word="other" ;;
-          esac
-          echo "code search smoke: $code $word"
-          # Only the names and values of three rate limit headers (a resource name and numbers).
-          if [ -f "$headers" ]; then
-            tr -d '\r' < "$headers" | grep -i -E '^(x-ratelimit-resource|x-ratelimit-remaining|retry-after): [A-Za-z0-9_-]{1,32}$' || true
-          fi
-          exit 0
       - name: Collect
         env:
           GITHUB_TOKEN: ${{ github.token }}

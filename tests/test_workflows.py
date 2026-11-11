@@ -24,7 +24,6 @@ OVERLAY = os.path.join(REPO_ROOT, ".github", "scripts", "overlay_feed.py")
 GATE = "if: vars.REFRESH_ENABLED == 'true'"
 # Steps that may hold the token, as (job, step name); None as the step name allows the whole job.
 REFRESH_TOKEN_STEPS = {
-    ("collect", "Smoke check code search"),
     ("collect", "Collect"),
     ("publish-state", None),
     ("publish-history", "Download the feed"),
@@ -438,7 +437,7 @@ class WorkflowFiles(unittest.TestCase):
         config = json.loads(read(os.path.join(REPO_ROOT, "config", "sources.json")))
         self.assertEqual(config["max_requests"], 800)
         self.assertIn("--max-requests 800", self.refresh)
-        self.assertEqual(self.refresh.count("curl "), 1)
+        self.assertEqual(self.refresh.count("curl "), 0)  # no request outside the collector
         readme = read(os.path.join(REPO_ROOT, "README.md"))
         self.assertTrue("\n## Scheduled refresh\n" in readme, "README has no Scheduled refresh section")
         self.assertTrue("REFRESH_ENABLED" in readme, "README does not name REFRESH_ENABLED")

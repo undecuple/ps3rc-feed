@@ -15,7 +15,8 @@ An automated, unofficial activity feed for PS3 recompilation projects on GitHub.
   <a href="https://deepwiki.com/undecuple/ps3rc-feed"><img alt="DeepWiki" src="https://img.shields.io/badge/DeepWiki-undecuple%2Fps3rc--feed-7ee787?style=flat-square&labelColor=161b22"></a>
 </p>
 
-**Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data, published by hand. It is not
+**Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data, refreshed every 6 hours by a
+scheduled job when that is enabled, and otherwise published by hand. It is not
 real time, and the page shows its own collection time. The last collection may be incomplete, and the page says so.
 
 ## What it is and is not
@@ -57,7 +58,7 @@ Not built yet: RSS and Discord feeds.
         --max-requests 300 --out data/run.json
 
     # the same, with the fetch order taken from the state the export keeps (see "Fetch order")
-    GITHUB_TOKEN=... python3 -B -m collector.cli collect --config <your config> --live \
+    GITHUB_TOKEN=... python3 -B -m collector collect --config <your config> --live \
         --max-requests 300 --out data/run-003.json --previous-state data/state.json
 
     # site feed from run files, no network
@@ -166,7 +167,7 @@ incomplete commits listing (a page cap, dropped items) still does.
 2. Check the budget: `max_requests` stays under the token's hourly limit with margin (the job's built-in token
    allows 1000 requests an hour, search 30 a minute, code search 10 a minute), and repository searches x
    `page_caps.search` + code searches x `page_caps.code` + roots x `page_caps.forks` + 4 x `max_repositories` fits in
-   `max_requests`. For the committed config: 6 x 3 + 1 x 10 = 28, plus 4 x 190 = 760, is 788 of 800. The committed config has no code query: code search answered 429 on every run with the built-in token, so it stays an option for other configs, not a source here.
+   `max_requests`. The committed config has no code query: code search answered 429 on every run with the built-in token, so it stays an option for other configs, not a source here.
    The fetch order changes which candidates are fetched, not how many, and `--previous-state` costs no request.
    With 190 places, two runs reach every candidate while there are at most 380 (fewer by the roots and `include`
    entries, which take a place in every run).
@@ -189,7 +190,7 @@ the data published by hand.
 
 When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand from the Actions tab. One run:
 
-1. Collects with `--max-requests 800`, plus one request that checks code search and prints only the status.
+1. Collects with `--max-requests 800`.
 2. Exports on top of the state saved by the previous run.
 3. Checks the run. An abnormal stop publishes nothing: when the run stopped for anything but the request budget
    (`rate_limited`, `search_rate_limited`, `code_search_rate_limited`, `network`) or the feed lists no repositories,
@@ -201,9 +202,9 @@ When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand fr
 6. Adds the run to the `feed-history` branch, on a first run too. This job runs beside steps 4 and 5, and its
    failure does not stop them.
 
-A run makes at most 801 requests, and four runs a day make at most 3,204. Scheduled runs start 6 hours apart and
+A run makes at most 800 requests, and four runs a day make at most 3,200. Scheduled runs start 6 hours apart and
 never overlap, so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
-by hand adds up to 801 more, and the collector stops when it reaches a rate limit.
+by hand adds up to 800 more, and the collector stops when it reaches a rate limit.
 
 Code search on the Actions token: its secondary limit is observed, not documented. GitHub publishes no figure for
 the built-in token, so the collector's handling follows what live runs showed. The first code search request
