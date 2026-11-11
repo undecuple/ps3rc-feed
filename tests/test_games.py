@@ -42,12 +42,12 @@ def classify(full_name, desc=None, heading=None, aliases=None):
 
 
 class CommittedFile(CollectorTestCase):
-    def test_it_loads_and_holds_only_the_starter_set(self):
+    def test_it_loads_and_starts_with_the_starter_set(self):
         from collector import games
 
         loaded = games.load()
         self.assertEqual(
-            [e["key"] for e in loaded.entries],
+            [e["key"] for e in loaded.entries][:11],
             [
                 "god-of-war-ascension", "drakengard-3", "infamous-2", "infamous", "demons-souls",
                 "gran-turismo-5-prologue", "saints-row-2", "resistance-fall-of-man", "resistance-2",
@@ -369,5 +369,6 @@ class GamesCommand(CollectorTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(["games"]), cli.EXIT_OK)
         payload = json.loads(out.getvalue())
-        self.assertEqual(payload["games"], 11)
+        with open(os.path.join(REPO_ROOT, "config", "games.json"), encoding="utf-8") as fh:
+            self.assertEqual(payload["games"], len(json.load(fh)["games"]))
         self.assertNotIn("changes", payload)

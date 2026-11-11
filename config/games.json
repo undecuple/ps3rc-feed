@@ -4,70 +4,605 @@
     {
       "key": "god-of-war-ascension",
       "title": "God of War: Ascension",
-      "aliases": ["gow ascension", "god of war ascension", "ascension-r"],
+      "aliases": [
+        "gow ascension",
+        "god of war ascension",
+        "ascension-r"
+      ],
       "platform": "PS3"
     },
     {
       "key": "drakengard-3",
       "title": "Drakengard 3",
-      "aliases": ["dod3", "drakengard 3"],
+      "aliases": [
+        "dod3",
+        "drakengard 3"
+      ],
       "platform": "PS3"
     },
     {
       "key": "infamous-2",
       "title": "inFAMOUS 2",
-      "aliases": ["infamous 2"],
+      "aliases": [
+        "infamous 2"
+      ],
       "platform": "PS3"
     },
     {
       "key": "infamous",
       "title": "inFAMOUS",
-      "aliases": ["infamous"],
+      "aliases": [
+        "infamous"
+      ],
       "platform": "PS3"
     },
     {
       "key": "demons-souls",
       "title": "Demon's Souls",
-      "aliases": ["demon's souls", "demons souls"],
+      "aliases": [
+        "demon's souls",
+        "demons souls"
+      ],
       "platform": "PS3"
     },
     {
       "key": "gran-turismo-5-prologue",
       "title": "Gran Turismo 5 Prologue",
-      "aliases": ["gran turismo 5 prologue", "gt5p"],
+      "aliases": [
+        "gran turismo 5 prologue",
+        "gt5p"
+      ],
       "platform": "PS3"
     },
     {
       "key": "saints-row-2",
       "title": "Saints Row 2",
-      "aliases": ["saints row 2", "saintsrow2"],
+      "aliases": [
+        "saints row 2",
+        "saintsrow2"
+      ],
       "platform": "PS3"
     },
     {
       "key": "resistance-fall-of-man",
       "title": "Resistance: Fall of Man",
-      "aliases": ["resistance fall of man"],
-      "name_patterns": ["resistance-recomp"],
+      "aliases": [
+        "resistance fall of man"
+      ],
+      "name_patterns": [
+        "resistance-recomp"
+      ],
       "platform": "PS3"
     },
     {
       "key": "resistance-2",
       "title": "Resistance 2",
-      "aliases": ["resistance 2"],
+      "aliases": [
+        "resistance 2"
+      ],
       "platform": "PS3"
     },
     {
       "key": "red-dead-redemption",
       "title": "Red Dead Redemption",
-      "aliases": ["red dead redemption"],
-      "name_patterns": ["rdr-recomp"],
+      "aliases": [
+        "red dead redemption"
+      ],
+      "name_patterns": [
+        "rdr-recomp"
+      ],
       "platform": "PS3"
     },
     {
       "key": "guitar-hero-iii",
       "title": "Guitar Hero III",
-      "aliases": ["guitar hero iii", "guitar hero 3"],
-      "name_patterns": ["gh3"],
+      "aliases": [
+        "guitar hero iii",
+        "guitar hero 3"
+      ],
+      "name_patterns": [
+        "gh3"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "super-mario-kart",
+      "title": "Super Mario Kart",
+      "aliases": [
+        "super mario kart"
+      ],
+      "platform": "SNES"
+    },
+    {
+      "key": "stunt-race-fx",
+      "title": "Stunt Race FX",
+      "aliases": [
+        "stunt race fx"
+      ],
+      "platform": "SNES"
+    },
+    {
+      "key": "advance-wars",
+      "title": "Advance Wars",
+      "aliases": [
+        "advance wars"
+      ],
+      "platform": "GBA"
+    },
+    {
+      "key": "tokyo-jungle",
+      "title": "Tokyo Jungle",
+      "aliases": [
+        "tokyo jungle"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "the-simpsons-arcade-game",
+      "title": "The Simpsons Arcade Game",
+      "aliases": [
+        "the simpsons arcade game",
+        "simpsons arcade"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "yakuza-dead-souls",
+      "title": "Yakuza: Dead Souls",
+      "aliases": [
+        "yakuza dead souls"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "you-dont-know-jack",
+      "title": "You Don't Know Jack",
+      "aliases": [
+        "you don t know jack"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "god-of-war-ii",
+      "title": "God of War II",
+      "aliases": [
+        "god of war ii",
+        "god of war 2"
+      ],
+      "name_patterns": [
+        "gow2"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "twisted-metal-2012",
+      "title": "Twisted Metal (2012)",
+      "aliases": [
+        "twisted metal 2012"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "rampage-world-tour",
+      "title": "Rampage World Tour",
+      "aliases": [
+        "rampage world tour"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "virtua-fighter-5",
+      "title": "Virtua Fighter 5",
+      "aliases": [
+        "virtua fighter 5"
+      ],
+      "name_patterns": [
+        "vf5"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "metal-slug-2",
+      "title": "Metal Slug 2",
+      "aliases": [
+        "metal slug 2"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "scott-pilgrim-vs-the-world",
+      "title": "Scott Pilgrim vs. The World: The Game",
+      "aliases": [
+        "scott pilgrim vs the world"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "shadow-of-the-colossus",
+      "title": "Shadow of the Colossus",
+      "aliases": [
+        "shadow of the colossus"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "uncharted-drakes-fortune",
+      "title": "Uncharted: Drake's Fortune",
+      "aliases": [
+        "uncharted drake s fortune"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "ben-10-omniverse",
+      "title": "Ben 10 Omniverse",
+      "aliases": [
+        "ben 10 omniverse"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "playstation-all-stars-battle-royale",
+      "title": "PlayStation All-Stars Battle Royale",
+      "aliases": [
+        "all stars battle royale"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "crazy-taxi",
+      "title": "Crazy Taxi",
+      "aliases": [
+        "crazy taxi"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "tornado-outbreak",
+      "title": "Tornado Outbreak",
+      "aliases": [
+        "tornado outbreak"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "midway-arcade-origins",
+      "title": "Midway Arcade Origins",
+      "aliases": [
+        "midway arcade origins"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "tekken-6",
+      "title": "Tekken 6",
+      "aliases": [
+        "tekken 6"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "disgaea-d2",
+      "title": "Disgaea D2: A Brighter Darkness",
+      "aliases": [
+        "disgaea d2"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "resident-evil-code-veronica-x-hd",
+      "title": "Resident Evil Code: Veronica X HD",
+      "aliases": [
+        "code veronica",
+        "resident evil code veronica"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "imabikisou",
+      "title": "Imabikisou",
+      "aliases": [
+        "imabikisou"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "soulcalibur-ii-hd",
+      "title": "Soulcalibur II HD",
+      "aliases": [
+        "soulcalibur ii",
+        "soulcalibur 2"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "killzone-2",
+      "title": "Killzone 2",
+      "aliases": [
+        "killzone 2"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "white-knight-chronicles-ii",
+      "title": "White Knight Chronicles II",
+      "aliases": [
+        "white knight chronicles ii",
+        "white knight chronicles 2"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "littlebigplanet",
+      "title": "LittleBigPlanet",
+      "aliases": [
+        "littlebigplanet",
+        "little big planet"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "tekken-5-dark-resurrection",
+      "title": "Tekken 5: Dark Resurrection",
+      "aliases": [
+        "tekken 5",
+        "tekken 5 dark resurrection"
+      ],
+      "name_patterns": [
+        "t5dr"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "killzone-ps2",
+      "title": "Killzone",
+      "aliases": [
+        "killzone ps2"
+      ],
+      "platform": "PS2"
+    },
+    {
+      "key": "killzone-liberation",
+      "title": "Killzone: Liberation",
+      "aliases": [
+        "killzone liberation"
+      ],
+      "platform": "PSP"
+    },
+    {
+      "key": "god-of-war-iii",
+      "title": "God of War III",
+      "aliases": [
+        "god of war iii",
+        "god of war 3"
+      ],
+      "name_patterns": [
+        "gow3"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "supersonic-acrobatic-rocket-powered-battle-cars",
+      "title": "Supersonic Acrobatic Rocket-Powered Battle-Cars",
+      "aliases": [
+        "supersonic acrobatic rocket powered battle cars"
+      ],
+      "name_patterns": [
+        "sarpbc"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "toro-lets-party",
+      "title": "TORO! Let's Party!",
+      "aliases": [
+        "toro let s party",
+        "paatii neko"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "killzone-shadow-fall",
+      "title": "Killzone: Shadow Fall",
+      "aliases": [
+        "killzone shadow fall"
+      ],
+      "platform": "PS4"
+    },
+    {
+      "key": "kamen-rider-battride-war",
+      "title": "Kamen Rider: Battride War",
+      "aliases": [
+        "kamen rider battride war",
+        "battride war"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "mlb-the-show-16",
+      "title": "MLB The Show 16",
+      "aliases": [
+        "mlb the show 16",
+        "mlb 16"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "bakugan-battle-brawlers",
+      "title": "Bakugan: Battle Brawlers",
+      "aliases": [
+        "bakugan battle brawlers"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "tony-hawks-project-8",
+      "title": "Tony Hawk's Project 8",
+      "aliases": [
+        "tony hawk s project 8"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "killzone-mercenary",
+      "title": "Killzone Mercenary",
+      "aliases": [
+        "killzone mercenary"
+      ],
+      "platform": "PS Vita"
+    },
+    {
+      "key": "gran-turismo-6",
+      "title": "Gran Turismo 6",
+      "aliases": [
+        "gran turismo 6"
+      ],
+      "name_patterns": [
+        "gt6"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "fifa-street",
+      "title": "FIFA Street",
+      "aliases": [
+        "fifa street"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "killzone-3",
+      "title": "Killzone 3",
+      "aliases": [
+        "killzone 3"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "bomberman-ultra",
+      "title": "Bomberman ULTRA",
+      "aliases": [
+        "bomberman ultra"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "naruto-ultimate-ninja-storm",
+      "title": "Naruto: Ultimate Ninja Storm",
+      "aliases": [
+        "naruto ultimate ninja storm"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "monster-high-new-ghoul-in-school",
+      "title": "Monster High: New Ghoul in School",
+      "aliases": [
+        "monster high new ghoul in school"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "gran-turismo-5",
+      "title": "Gran Turismo 5",
+      "aliases": [
+        "gran turismo 5"
+      ],
+      "name_patterns": [
+        "gt5"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "dot-hack-versus",
+      "title": ".hack Versus",
+      "aliases": [
+        "dot hack versus"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "digger-hd",
+      "title": "Digger HD",
+      "aliases": [
+        "digger hd"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "killzone-hd",
+      "title": "Killzone HD",
+      "aliases": [
+        "killzone hd"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "3d-dot-game-heroes",
+      "title": "3D Dot Game Heroes",
+      "aliases": [
+        "3d dot game heroes"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "sega-rally-online-arcade",
+      "title": "SEGA Rally Online Arcade",
+      "aliases": [
+        "sega rally online arcade"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "motorstorm-pacific-rift",
+      "title": "MotorStorm: Pacific Rift",
+      "aliases": [
+        "motorstorm pacific rift"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "nhl-legacy-edition",
+      "title": "NHL Legacy Edition",
+      "aliases": [
+        "nhl legacy edition"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "saint-seiya-brave-soldiers",
+      "title": "Saint Seiya: Brave Soldiers",
+      "aliases": [
+        "saint seiya brave soldiers"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "sonic-the-hedgehog-2006",
+      "title": "Sonic the Hedgehog (2006)",
+      "aliases": [
+        "sonic the hedgehog 2006"
+      ],
+      "name_patterns": [
+        "sonic06"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "pro-evolution-soccer-2013",
+      "title": "Pro Evolution Soccer 2013",
+      "aliases": [
+        "pro evolution soccer 2013",
+        "pes 2013"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "afro-samurai",
+      "title": "Afro Samurai",
+      "aliases": [
+        "afro samurai"
+      ],
       "platform": "PS3"
     }
   ]

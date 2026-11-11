@@ -126,14 +126,14 @@ class GameTitleTests(CollectorTestCase):
     def test_heading_restating_the_repository_name_is_not_a_game(self):
         for full_name, heading in (
             ("kj564/ps3-wasm-ports", "ps3-wasm-ports"),
-            ("MormonFTP-hub/gt5-recomp", "GT5 Recomp"),
+            ("some-org/skyfall5-recomp", "Skyfall5 Recomp"),
             ("eliaaventuri/ps3-uncharted", "ps3-uncharted"),
             ("ColinGamez/allstars-ps3", "allstars-ps3"),
             ("uhub/awesome-c", "awesome-c"),
             ("zdiemer/haze-recomp", "Haze Recomp"),
             # Repository name plus a trailing recomp/port/pc word.
             ("some-org/haze", "Haze PC Port"),
-            ("some-org/gt5", "GT5 Recompiled"),
+            ("some-org/skyfall5", "Skyfall5 Recompiled"),
         ):
             with self.subTest(full_name=full_name):
                 self.assertUnclassified(full_name, heading)
