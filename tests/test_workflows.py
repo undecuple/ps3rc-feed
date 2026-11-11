@@ -477,8 +477,17 @@ class WorkflowFiles(unittest.TestCase):
                 self.assertLess(overlay, text.index(render))
                 upload = text.index("actions/upload-pages-artifact@", text.index("mkdir out"))
                 self.assertLess(text.index(render), upload)
+        atom = "node site/tools/render_atom.js out/data/feed.json out/feed.atom\n"
+        for name in ("pages.yml", "refresh.yml"):
+            with self.subTest(name=name, step="atom"):
+                text = read(os.path.join(WORKFLOWS, name))
+                self.assertEqual(text.count(atom), 1)
+                self.assertLess(text.index(".github/scripts/overlay_feed.py", text.index("mkdir out")), text.index(atom))
+                self.assertLess(text.index(atom), text.index("actions/upload-pages-artifact@", text.index("mkdir out")))
         index = read(os.path.join(REPO_ROOT, "site", "index.html"))
         self.assertIn('<a href="static.html">no JavaScript? static list</a>', index)
+        self.assertIn('<a href="feed.atom">Atom feed</a>', index)
+        self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, "site", "tools", "render_atom.js")))
         self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, "site", "tools", "render_static.js")))
 
 

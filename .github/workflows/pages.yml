@@ -74,6 +74,7 @@ jobs:
           cd ..
           python3 -B .github/scripts/overlay_feed.py feed-state out/data
           node site/tools/render_static.js out/data/feed.json out/static.html
+          node site/tools/render_atom.js out/data/feed.json out/feed.atom
           cd out
           find . -type f | sort
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
