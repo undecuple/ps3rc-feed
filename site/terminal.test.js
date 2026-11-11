@@ -535,6 +535,9 @@ test('empty view message: feed with repositories but no events says so; other ca
     ['recent', 0, 0, none],
     ['recent', 0, 165, none],
     ['recent', 165, 165, filtered],
+    ['games', 0, 0, none],
+    ['games', 0, 165, none],
+    ['games', 165, 165, filtered],
     ['about', 0, 0, null],
     ['about', 0, 165, null],
     ['about', 3, 165, null],
@@ -549,11 +552,11 @@ test('empty view message: feed with repositories but no events says so; other ca
 });
 
 test('views and commands include recent, with help and completion', () => {
-  assert.deepEqual(T.VIEWS, ['feed', 'table', 'forks', 'recent', 'about']);
-  for (const c of ['feed', 'table', 'forks', 'recent', 'about']) assert.ok(T.COMMAND_NAMES.includes(c), c);
-  assert.match(run('help view').out[0].text, /^view feed\|table\|forks\|recent\|about /);
-  assert.match(run('help view').out[0].text, /also: feed, table, forks, recent, about as commands/);
-  assert.equal(run('view nope').out[0].text, 'usage: view feed|table|forks|recent|about');
+  assert.deepEqual(T.VIEWS, ['feed', 'table', 'forks', 'recent', 'games', 'about']);
+  for (const c of ['feed', 'table', 'forks', 'recent', 'games', 'about']) assert.ok(T.COMMAND_NAMES.includes(c), c);
+  assert.match(run('help view').out[0].text, /^view feed\|table\|forks\|recent\|games\|about /);
+  assert.match(run('help view').out[0].text, /also: feed, table, forks, recent, games, about as commands/);
+  assert.equal(run('view nope').out[0].text, 'usage: view feed|table|forks|recent|games|about');
   assert.deepEqual(T.complete('view re', ctx), { line: 'view recent ', options: [] });
   assert.deepEqual(T.complete('rece', ctx), { line: 'recent ', options: [] });
   // typing the shorthand at the prompt waits for Enter instead of searching
@@ -664,4 +667,80 @@ test('the page builds the github search link from githubSearchUrl as text, never
   // it sits under the empty message, and only there
   assert.ok(/T\.emptyMessage\(state\.view, all\.length, recs\.repos\.length\)\)\);\n\s*const more = githubSearchLink\(state\.search\);\n\s*if \(more\) box\.append\(more\);/.test(app));
   assert.equal((app.match(/githubSearchLink\(/g) || []).length, 2);
+});
+
+test('games view: command, help, completion and default sort', () => {
+  assert.equal(run('games').state.view, 'games');
+  const r = run('view games');
+  assert.deepEqual(r.state.sort, { key: 'repos', dir: 'desc' });
+  assert.equal(r.out[0].text, 'view: games  sort: -repos');
+  assert.deepEqual(run('games', run('sort stars').state).state.sort, { key: 'stars', dir: 'asc' });
+  assert.deepEqual(run('sort repos').state.sort, { key: 'repos', dir: 'asc' });
+  // leaving the games view with the repos sort goes back to the default sort
+  assert.deepEqual(run('table', r.state).state.sort, { key: 'time', dir: 'desc' });
+  assert.deepEqual(run('recent', r.state).state.sort, { key: 'first-seen', dir: 'desc' });
+  assert.deepEqual(T.complete('view ga', ctx), { line: 'view games ', options: [] });
+  assert.deepEqual(T.complete('gam', ctx), { line: 'games ', options: [] });
+  assert.equal(T.liveSearchText('games'), null);
+  assert.match(run('help sort').out[0].text, /repos \(games view\)/);
+});
+
+test('games rows: one per game name, label from the repositories, counts; repo count then name; unknown last', () => {
+  const t = (iso) => Date.parse(iso);
+  const mk = (id, game, extra) => Object.assign({ id, repo: 'o/' + id, game, gameInferred: false, gameInherited: false, fork: false, stars: 1, time: null }, extra);
+  const inh = { gameInherited: true };
+  const inf = { gameInferred: true };
+  const list = [
+    mk('a', 'Zeta', { time: t('2026-11-01T00:00:00Z'), stars: 3 }),
+    mk('b', 'Zeta', Object.assign({ fork: true, time: t('2026-11-05T00:00:00Z'), stars: null }, inh)),
+    mk('c', null, { stars: 7 }),
+    mk('d', 'alpha', Object.assign({ time: t('2026-10-01T00:00:00Z') }, inf)),
+    mk('e', 'Beta', Object.assign({ fork: true, stars: null }, inh)),
+    mk('f', 'alpha', Object.assign({ fork: null, time: t('2026-10-02T00:00:00Z') }, inf)),
+    mk('g', 'Zeta', inf),
+    mk('h', '', {}),
+    mk('i', 'Gamma', { gameInherited: true, gameInferred: true, stars: 2, time: t('2026-09-01T00:00:00Z') }),
+    mk('j', 'Gamma', Object.assign({ stars: 0 }, inh)),
+    mk('k', 'Delta', { stars: 5 }),
+  ];
+  const rows = T.gamesRows(list);
+  assert.deepEqual(rows.map((g) => [g.game, g.label, g.repos, g.forks, g.stars, g.latest && g.latest.id]), [
+    ['Zeta', 'mixed: 1 inherited / unverified, 1 inferred, 1 not inferred', 3, 1, 4, 'b'],
+    ['alpha', 'inferred', 2, 0, 2, 'f'],
+    ['Gamma', 'inherited / unverified', 2, 0, 2, 'i'],
+    ['Beta', 'inherited / unverified', 1, 1, null, null],
+    ['Delta', 'not inferred', 1, 0, 5, null],
+    ['unknown', 'no game', 2, 0, 8, null],
+  ]);
+  assert.equal(rows[rows.length - 1].unknown, true);
+  // a row with an inherited or inferred repository is never labelled as plain
+  assert.equal(T.gamesRows([mk('x', 'Q', {}), mk('y', 'Q', inh)])[0].label, 'mixed: 1 inherited / unverified, 1 not inferred');
+  assert.equal(T.gamesRows([mk('x', 'Q', inf), mk('y', 'Q', inh)])[0].label, 'mixed: 1 inherited / unverified, 1 inferred');
+  // other sorts keep unknown last; ties go by name
+  const order = (key, dir) => T.gamesRows(list, { key, dir }).map((g) => g.game);
+  assert.deepEqual(order('game', 'desc'), ['Zeta', 'Gamma', 'Delta', 'Beta', 'alpha', 'unknown']);
+  assert.deepEqual(order('stars', 'desc'), ['Delta', 'Zeta', 'alpha', 'Gamma', 'Beta', 'unknown']);
+  assert.deepEqual(order('time', 'asc'), ['Gamma', 'alpha', 'Zeta', 'Beta', 'Delta', 'unknown']);
+  assert.deepEqual(order('repos', 'asc'), ['Beta', 'Delta', 'alpha', 'Gamma', 'Zeta', 'unknown']);
+  assert.deepEqual(T.gamesRows([]), []);
+  assert.deepEqual(list.map((r) => r.id), ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']);
+});
+
+test('games rows follow the untouched forks rule and cover every repository of the sample', () => {
+  const st = T.initialState();
+  const kept = T.dropUntouched(repos, st);
+  assert.ok(kept.length < repos.length);
+  const total = (rows) => rows.reduce((n, g) => n + g.repos, 0);
+  assert.equal(total(T.gamesRows(kept)), kept.length);
+  assert.equal(total(T.gamesRows(T.dropUntouched(repos, Object.assign({}, st, { search: 'x' })))), repos.length);
+  assert.equal(total(T.gamesRows(T.dropUntouched(repos, Object.assign({}, st, { hideUntouched: false })))), repos.length);
+  const forks = T.gamesRows(repos).reduce((n, g) => n + g.forks, 0);
+  assert.equal(forks, repos.filter((r) => r.fork === true).length);
+  const app = fs.readFileSync(__dirname + '/app.js', 'utf8');
+  assert.ok(app.includes('T.gamesRows(repos, state.sort)') && app.includes("Repositories: 'repos'"));
+  // one row per game name across the sample
+  const names = T.gamesRows(repos).map((g) => g.game);
+  assert.equal(new Set(names).size, names.length);
+  assert.equal(names.length, new Set(repos.map((r) => r.game || 'unknown')).size);
+  assert.ok(app.includes('cell(tr, g.label);'));
 });

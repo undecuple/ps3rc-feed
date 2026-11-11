@@ -210,7 +210,7 @@
   }
 
   // Column headings that can sort: clicking one runs the same `sort` command as the sort chips.
-  const HEAD_SORT = { Time: 'time', Game: 'game', 'Game / inferred title': 'game', 'Game association': 'game', Owner: 'owner', 'Latest commit': 'time', 'Commits 30d': 'commits', Stars: 'stars', Status: 'status', 'First seen': 'first-seen' };
+  const HEAD_SORT = { Time: 'time', Game: 'game', 'Game / inferred title': 'game', 'Game association': 'game', Owner: 'owner', 'Latest commit': 'time', 'Commits 30d': 'commits', Stars: 'stars', Status: 'status', 'First seen': 'first-seen', Repositories: 'repos', 'Total stars': 'stars' };
 
   function sortHead(tag, label) {
     const node = el(tag);
@@ -324,6 +324,34 @@
     return wrap;
   }
 
+  // One row per game name, from the repositories the table would show.
+  function gamesView(repos) {
+    const wrap = el('div', 'tablewrap');
+    const table = el('table');
+    table.append(el('caption', null, 'Games (one row per game name; Label says how the name was obtained; repositories without a game are counted under unknown)'));
+    const tr0 = el('tr');
+    ['Game', 'Label', 'Repositories', 'Forks', 'Most recent repository', 'Latest commit', 'Total stars'].forEach((h) => tr0.append(sortHead('th', h)));
+    const thead = el('thead');
+    thead.append(tr0);
+    table.append(thead);
+    const tbody = el('tbody');
+    for (const g of T.gamesRows(repos, state.sort)) {
+      const tr = el('tr');
+      cell(tr, g.game);
+      cell(tr, g.label);
+      cell(tr, String(g.repos));
+      cell(tr, String(g.forks));
+      if (g.latest) repoCell(tr, g.latest);
+      else cell(tr, 'unknown');
+      cell(tr, g.latest ? T.ago(g.latest.time, now()) : 'unknown');
+      cell(tr, T.orUnknown(g.stars));
+      tbody.append(tr);
+    }
+    table.append(tbody);
+    wrap.append(table);
+    return wrap;
+  }
+
   function aboutView() {
     const d = el('div', 'about');
     const add = (tag, text) => d.append(el(tag, null, text));
@@ -339,7 +367,7 @@
     add('h2', 'Status values');
     add('p', 'Statuses describe observed activity only: active (activity in the last 30 days), quiet (older), stale (collection is failing), archived. They say nothing about whether a project works. unknown means missing, never zero.');
     add('h2', 'Fork and game labels');
-    add('p', 'Fork ancestry, inferred game and detected toolkit are separate. A game inherited from a parent is shown as inherited / unverified. Ahead/behind is relative to a recorded ref and time.');
+    add('p', 'Fork ancestry, inferred game and detected toolkit are separate. A game inherited from a parent is shown as inherited / unverified. Ahead/behind is relative to a recorded ref and time. The games view has one row per game name, and its Label column says whether the name was inherited, inferred, not inferred, or mixed, with counts.');
     add('h2', 'Keys');
     add('p', 'Type commands at the prompt (help lists them). Tab completes, Up/Down recall history, Esc clears the line, Ctrl+L clears output, / focuses the prompt.');
     return d;
@@ -372,7 +400,7 @@
     const prevTop = box.scrollTop;
     const { all, shown, hidden } = visibleItems();
     box.replaceChildren();
-    box.setAttribute('aria-label', { feed: 'Feed', table: 'Catalog table', forks: 'Fork network', recent: 'Recently discovered', about: 'About' }[state.view]);
+    box.setAttribute('aria-label', { feed: 'Feed', table: 'Catalog table', forks: 'Fork network', recent: 'Recently discovered', games: 'Games', about: 'About' }[state.view]);
 
     if (state.view === 'about') {
       box.append(aboutView());
@@ -395,6 +423,8 @@
       box.append(ul);
     } else if (state.view === 'recent') {
       box.append(recentView(shown));
+    } else if (state.view === 'games') {
+      box.append(gamesView(shown));
     } else {
       box.append(tableView(shown, state.view === 'forks'));
     }
@@ -429,7 +459,7 @@
 
   const QUICK_FILTERS = ['category:framework', 'category:game', 'category:tool', 'category:unclassified', 'status:active', 'status:quiet', 'status:stale', 'status:archived', 'fork:yes', 'time:<24h', 'time:<7d', 'toolkit:ps3recomp'];
   const QUICK_SORTS = ['time', 'stars', 'commits', 'owner', 'game', 'first-seen'];
-  const DESC_FIRST = ['time', 'stars', 'commits', 'first-seen'];
+  const DESC_FIRST = ['time', 'stars', 'commits', 'first-seen', 'repos'];
 
   function renderChrome(total, count, hidden) {
     const c = ctx();

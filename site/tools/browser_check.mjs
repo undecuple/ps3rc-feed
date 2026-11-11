@@ -227,7 +227,7 @@ for (const [kind, page, search] of runs) {
       const long = 'qzv'.repeat(30);
       r.ghLink = {};
       await typeLine('reset');
-      for (const v of ['feed', 'table', 'forks', 'recent']) {
+      for (const v of ['feed', 'table', 'forks', 'recent', 'games']) {
         await typeLine('view ' + v);
         await typeFresh(nonsense);
         const got = await ghLink();
@@ -358,6 +358,29 @@ for (const [kind, page, search] of runs) {
       const filtered = await recentCol();
       r.recent.filtered = filtered.rows;
       check(filtered.rows > 0 && filtered.rows < first.rows && ordered(filtered.times, 'desc'), name + ': filter in the recent view ' + filtered.rows);
+      await typeLine('reset');
+    }
+    {
+      // games view: one row per game name; the repository counts add up to the table's rows
+      await typeLine('reset');
+      await typeLine('view table');
+      const tableRows = await evalJs("document.querySelectorAll('#view tbody tr').length");
+      await typeLine('view games');
+      const games = await evalJs(`(() => {
+        const trs = [...document.querySelectorAll('#view tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent));
+        return { heads: [...document.querySelectorAll('#view thead th')].map((t) => t.textContent.replace(/ [▲▼]/, '')), rows: trs };
+      })()`);
+      const counts = games.rows.map((x) => Number(x[2]));
+      const known = games.rows.filter((x) => x[0] !== 'unknown').map((x) => Number(x[2]));
+      r.games = { rows: games.rows.length, repos: counts.reduce((a, b) => a + b, 0), tableRows, last: games.rows.length ? games.rows[games.rows.length - 1][0] : null };
+      check(games.heads.join() === 'Game,Label,Repositories,Forks,Most recent repository,Latest commit,Total stars', name + ': games headings ' + JSON.stringify(games.heads));
+      check(games.rows.length > 0 && r.games.repos === tableRows, name + ': games repository counts do not add up to the table ' + JSON.stringify(r.games));
+      check(known.every((n, i) => i === 0 || known[i - 1] >= n) && games.rows.findIndex((x) => x[0] === 'unknown') in { [-1]: 1, [games.rows.length - 1]: 1 }, name + ': games order ' + JSON.stringify(games.rows.map((x) => x[0] + ':' + x[2])));
+      const names = games.rows.map((x) => x[0]);
+      check(new Set(names).size === names.length && names.every((n) => !/\[(inferred|inherited)/.test(n)), name + ': games rows are not one per game name ' + JSON.stringify(names));
+      check(games.rows.every((x) => /^(inherited \/ unverified|inferred|not inferred|no game|mixed: \d+ .+)$/.test(x[1])), name + ': games label ' + JSON.stringify(games.rows.map((x) => x[1])));
+      check((await evalJs('document.documentElement.scrollWidth')) <= r.innerWidth, name + ': horizontal scroll in the games view');
+      await shot('-games');
       await typeLine('reset');
     }
     if (kind === 'real') {
