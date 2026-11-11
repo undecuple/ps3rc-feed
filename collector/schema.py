@@ -56,7 +56,8 @@ COLLECTION_STATES = ("ok", "partial", "failing", "stale", "not_found")
 # Why a collection did not finish. search_rate_limited: the search bucket ran
 # out and the searches were cut short while the run continued on other endpoints.
 # code_search_rate_limited: the same for the separate code search bucket.
-STOP_REASONS = ("rate_limited", "budget", "network", "search_rate_limited", "code_search_rate_limited")
+# unauthorized: GitHub answered 401 (the token was rejected); never publishable.
+STOP_REASONS = ("rate_limited", "budget", "network", "search_rate_limited", "code_search_rate_limited", "unauthorized")
 # Search kinds a run records. A search without `kind` is a repository search
 # (GET /search/repositories); "code" is GET /search/code, whose ids are the
 # repositories holding a matching file: discovery provenance only, no claim
