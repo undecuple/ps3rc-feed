@@ -27,7 +27,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 
-from . import catalog, collect, events, export, forks, games, github, history, schema, store
+from . import catalog, collect, discord, events, export, forks, games, github, history, schema, store
 from .paths import DATA_ROOT, FIXTURE_ROOT, REPO_ROOT
 
 EXIT_OK = 0
@@ -219,6 +219,9 @@ def build_parser():
     )
     gam = sub.add_parser("games", help="check config/games.json; with --state, print which repositories would change game label; no network")
     gam.add_argument("--state", help="state saved by export --state-out (.json under data/) to re-label with the current list; read only")
+    dis = sub.add_parser("discord", help="print the Discord messages a feed.json would send, given the delivery state; reads files under data/, writes nothing, no network")
+    dis.add_argument("--feed", required=True, help="feed.json written by export (.json under data/)")
+    dis.add_argument("--delivery-state", help="delivery state (.json under data/); without it the plan is a baseline: no messages")
     return parser
 
 
@@ -247,6 +250,36 @@ def run_games(args):
         payload["changes"] = changes
         payload["key_changes"] = sum(1 for c in changes if c["from"]["key"] != c["to"]["key"])
     _print(payload)
+    return EXIT_OK
+
+
+def _read_json_input(value, flag):
+    """A regular .json file under data/ (the --runs path rules), parsed."""
+    _check_path_text(value, flag)
+    real = resolve_fixture_path(value, DATA_ROOT, label="the data/ directory", flag=flag)
+    if not real.endswith(".json"):
+        raise RefusedInput("refused: %s takes a .json file under the data/ directory" % flag)
+    if os.lstat(real).st_size > history.MAX_FEED_BYTES:
+        raise RefusedInput("refused: %s is larger than %d bytes" % (flag, history.MAX_FEED_BYTES))
+    try:
+        return json.loads(_read_regular(real, flag))
+    except ValueError:
+        raise RefusedInput("refused: %s is not valid JSON" % flag) from None
+
+
+def run_discord(args):
+    """Print what a feed would send to Discord (collector/discord.py); nothing is sent or written."""
+    feed = _read_json_input(args.feed, "--feed")
+    delivery = None if args.delivery_state is None else _read_json_input(args.delivery_state, "--delivery-state")
+    try:
+        result = discord.plan(feed, delivery)
+    except discord.StateError as exc:
+        raise RefusedInput("refused: %s" % exc) from None
+    _print({
+        "baseline": result["baseline"],
+        "messages": [{"kind": m["kind"], "event_ids": m["event_ids"], "content": m["payload"]["content"]} for m in result["messages"]],
+        "seen": len(result["state"]["seen"]),
+    })
     return EXIT_OK
 
 
@@ -959,6 +992,8 @@ def main(argv=None):
             return run_history(args)
         if args.command == "games":
             return run_games(args)
+        if args.command == "discord":
+            return run_discord(args)
         if args.command != "dry-run":
             parser.print_usage(sys.stderr)
             return EXIT_REFUSED
