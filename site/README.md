@@ -24,4 +24,6 @@ The `recent` view (or `view recent`) lists repositories by the time this collect
 
 Type `help` at the prompt for the commands.
 
+No JavaScript: both deploying workflows (`pages.yml` and the refresh deploy) run `node site/tools/render_static.js out/data/feed.json out/static.html` after the feed overlay, and `index.html` links the result as "no JavaScript? static list". It is one HTML file with no script and no inline style (it links `style.css`): the notice from `noticeText`, the disclaimer, the footer links and the 200 most recently discovered repositories (`sortRecent` by first seen, untouched forks dropped with `dropUntouched`), with a note when more exist. Repository links are only `https://github.com/<owner>/<repo>` URLs that pass `safeGithubUrl`. It is rendered once per deployment and does not update itself. Preview it locally with `node tools/render_static.js data/feed.json /tmp/static.html 2026-01-01T00:00:00Z` (the last argument fixes the time, so the output is the same on every run).
+
 Look: a dark window with a grey title bar and a green accent, set in IBM Plex Mono (fonts in `fonts/`, SIL Open Font License 1.1, see `fonts/OFL.txt`), on the tiled background `carpet.svg`. The filter prompt at the bottom is a local command parser, never a shell.

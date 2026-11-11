@@ -451,6 +451,22 @@ class WorkflowFiles(unittest.TestCase):
         self.assertIn("python3 -B .github/scripts/overlay_feed.py feed-state out/data", pages)
         self.assertNotIn("--required", pages)
 
+    def test_every_deploy_renders_the_static_page(self):
+        # index.html links static.html, so every workflow that deploys the page must render it, from the
+        # overlaid feed, before the artifact is uploaded, with the runner's own node and nothing new pinned.
+        render = "node site/tools/render_static.js out/data/feed.json out/static.html\n"
+        for name in ("pages.yml", "refresh.yml"):
+            with self.subTest(name=name):
+                text = read(os.path.join(WORKFLOWS, name))
+                self.assertEqual(text.count(render), 1)
+                overlay = text.index(".github/scripts/overlay_feed.py", text.index("mkdir out"))
+                self.assertLess(overlay, text.index(render))
+                upload = text.index("actions/upload-pages-artifact@", text.index("mkdir out"))
+                self.assertLess(text.index(render), upload)
+        index = read(os.path.join(REPO_ROOT, "site", "index.html"))
+        self.assertIn('<a href="static.html">no JavaScript? static list</a>', index)
+        self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, "site", "tools", "render_static.js")))
+
 
 # Each mutation breaks one rule in the refresh workflow; the checks must then report a problem.
 MUTATIONS = [
