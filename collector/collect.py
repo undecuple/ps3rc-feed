@@ -652,67 +652,72 @@ def _failure_kind(exc):
     return "response"
 
 
-def collect(client, config, run_at, last_attempted=None):
-    """Return (run, report). The run passes schema.validate_run; the report says what did not happen.
+class _Collection:
+    """The state of one collect() call and its phases: searches, forks walk, candidate choice, fetches, report."""
 
-    `last_attempted` ({repository id: timestamp}, see last_attempted_from_state)
-    sets the fetch order of the candidates (fetch_order); None orders them
-    newest id first after the roots and included repositories.
-    """
-    config = validate_config(dict(config))
-    schema.TIMESTAMP.check(run_at, "run_at")
-    caps = config["page_caps"]
-    run = {"run_at": run_at, "roots": [], "searches": [], "repositories": []}
-    report = {
-        "stopped": None,
-        # Search bucket stops seen (search_rate_limited, code_search_rate_limited).
-        "search_stops": set(),
-        "skipped_searches": 0,
-        # Code searches cut short or not asked because of a code search secondary limit.
-        "code_search_limited": 0,
-        "errors": [],
-        "error_count": 0,
-        "dropped_items": 0,
-        "not_fetched_repository_ids": [],
-        "candidates_truncated": False,
-        "filtered_out": 0,
-        "denied": 0,
-    }
-    # Repositories whose commits listing answered 409: their commits_complete false does not make the run incomplete.
-    commits_unavailable = set()
-    names = {}
-    candidates = set()
-    # Code search ids whose item gave no usable full_name: fetched only when another listing names them.
-    unnamed = set()
-    root_ids = set(r["repository_id"] for r in config["roots"])
-    authenticated = getattr(client, "token", None) is not None
+    def __init__(self, client, config, run_at):
+        self.client = client
+        self.config = config
+        self.run_at = run_at
+        self.caps = config["page_caps"]
+        self.run = {"run_at": run_at, "roots": [], "searches": [], "repositories": []}
+        self.report = {
+            "stopped": None,
+            # Search bucket stops seen (search_rate_limited, code_search_rate_limited).
+            "search_stops": set(),
+            "skipped_searches": 0,
+            # Code searches cut short or not asked because of a code search secondary limit.
+            "code_search_limited": 0,
+            "errors": [],
+            "error_count": 0,
+            "dropped_items": 0,
+            "not_fetched_repository_ids": [],
+            "candidates_truncated": False,
+            "filtered_out": 0,
+            "denied": 0,
+        }
+        # Repositories whose commits listing answered 409: their commits_complete false does not make the run incomplete.
+        self.commits_unavailable = set()
+        self.names = {}
+        self.candidates = set()
+        # Code search ids whose item gave no usable full_name: fetched only when another listing names them.
+        self.unnamed = set()
+        self.root_ids = set(r["repository_id"] for r in config["roots"])
+        self.authenticated = getattr(client, "token", None) is not None
+        self.include_ids = set()
+        for extra in config["include"]:
+            self.names.setdefault(extra["repository_id"], extra["full_name"])
+            self.include_ids.add(extra["repository_id"])
 
-    def note_error(path, reason):
+    # --- shared steps -----------------------------------------------------------
+
+    def note_error(self, path, reason):
+        report = self.report
         report["error_count"] += 1
         if len(report["errors"]) < MAX_REPORT_ERRORS:
             report["errors"].append({"path": path, "reason": reason})
 
-    def attempt(path, action, *args, **kwargs):
+    def attempt(self, path, action, *args, **kwargs):
         """One request. Returns (value, None) or (None, failure kind); raises _Stop on a run stop."""
-        before = client.requests_made
+        before = self.client.requests_made
         try:
             return action(*args, **kwargs), None
         except _STOPS as exc:
-            raise _Stop(github._stop_reason(exc), client.requests_made > before)
+            raise _Stop(github._stop_reason(exc), self.client.requests_made > before)
         except _FAILURES as exc:
             kind = _failure_kind(exc)
-            note_error(path, kind)
+            self.note_error(path, kind)
             return None, kind
 
-    def capped(items, kind):
+    def capped(self, items, kind):
         """Items within the run format's cap; the overflow counts as dropped."""
         cap = LIST_CAPS[kind]
         if len(items) > cap:
-            report["dropped_items"] += len(items) - cap
+            self.report["dropped_items"] += len(items) - cap
             return items[:cap], True
         return items, False
 
-    def listed_ids(items, path, terms=None):
+    def listed_ids(self, items, path, terms=None):
         """(ids kept, distinct ids listed). With `terms`, an item whose name and description
         contain none of them is not kept (and its name is not recorded)."""
         ids = []
@@ -721,16 +726,16 @@ def collect(client, config, run_at, last_attempted=None):
             try:
                 rid, full_name = _listed_repository(item, path)
             except github.ResponseError:
-                report["dropped_items"] += 1
+                self.report["dropped_items"] += 1
                 continue
             listed.add(rid)
             if terms is not None and not is_relevant(full_name, item.get("description"), terms):
                 continue
             ids.append(rid)
-            names.setdefault(rid, full_name)
+            self.names.setdefault(rid, full_name)
         return ids, listed
 
-    def code_ids(items, path, terms=None):
+    def code_ids(self, items, path, terms=None):
         """(ids kept, distinct ids listed) of code search items, by each item's `repository`.
 
         An item without a repository object or a valid repository id is
@@ -746,7 +751,7 @@ def collect(client, config, run_at, last_attempted=None):
             try:
                 rid = _id(repo, "id", path)
             except github.ResponseError:
-                report["dropped_items"] += 1
+                self.report["dropped_items"] += 1
                 continue
             try:
                 full_name = _full_name(repo, path)
@@ -757,255 +762,321 @@ def collect(client, config, run_at, last_attempted=None):
                 continue
             ids.append(rid)
             if full_name is None:
-                unnamed.add(rid)
+                self.unnamed.add(rid)
             else:
-                names.setdefault(rid, full_name)
+                self.names.setdefault(rid, full_name)
         return ids, listed
 
-    def after_pages(path, pages):
+    def after_pages(self, path, pages):
         """A run stop seen mid-walk ends the run; a search-bucket stop is noted; other interruptions are errors."""
         if pages.stopped == CODE_SECONDARY and path == github.CODE_SEARCH_PATH:
-            report["code_search_limited"] += 1
+            self.report["code_search_limited"] += 1
             return
         if pages.stopped in _RUN_STOPS:
             raise _Stop(pages.stopped, True)
         if pages.stopped in SEARCH_STOPS:
-            report["search_stops"].add(pages.stopped)
+            self.report["search_stops"].add(pages.stopped)
             return
         if pages.stopped is not None:
-            note_error(path, pages.stopped)
+            self.note_error(path, pages.stopped)
 
-    def apply_deny():
+    def apply_deny(self):
         """Remove denied candidates (by the name the listing gave) before anything is fetched.
 
         Roots and included repositories are never denied. A denied id is
         also taken out of the search and fork listings in the run, so it is
         not named anywhere and is not left pending.
         """
-        denied = set(rid for rid in candidates if rid not in root_ids and rid not in include_ids and is_denied(names[rid], config["deny"]))
+        candidates = self.candidates
+        denied = set(rid for rid in candidates if rid not in self.root_ids and rid not in self.include_ids and is_denied(self.names[rid], self.config["deny"]))
         if denied:
             candidates.difference_update(denied)
-            report["denied"] += len(denied)
-            for entry in run["searches"]:
+            self.report["denied"] += len(denied)
+            for entry in self.run["searches"]:
                 entry["repository_ids"] = [i for i in entry["repository_ids"] if i not in denied]
-            for entry in run["roots"]:
+            for entry in self.run["roots"]:
                 entry["found_repository_ids"] = [i for i in entry["found_repository_ids"] if i not in denied]
 
-    include_ids = set()
-    for extra in config["include"]:
-        names.setdefault(extra["repository_id"], extra["full_name"])
-        include_ids.add(extra["repository_id"])
+    # --- phase 1: searches ------------------------------------------------------
 
-    try:
-        for query_entry in config["queries"]:
-            query, terms, kind = query_text(query_entry), query_terms(query_entry), query_kind(query_entry)
-            path, bucket_stop = SEARCH_PATHS[kind], KIND_STOPS[kind]
-            entry = {"query": query, "complete": False, "repository_ids": []}
-            if kind == "code":
-                entry["kind"] = "code"
-            if terms is not None:
-                entry["filtered_out"] = 0
-            run["searches"].append(entry)
-            if kind == "code" and not authenticated:
-                # Code search refuses requests without a token: not asked, and the run is incomplete.
-                entry["skipped"] = "no_token"
-                entry["resume_cursor"] = "page=1"
-                report["skipped_searches"] += 1
-                continue
-            if bucket_stop in report["search_stops"]:
-                # This kind's bucket is exhausted: do not ask, record where to resume.
-                entry["resume_cursor"] = "page=1"
-                continue
-            try:
-                pages, failed = attempt(path, client.paginate, path, {"q": query, "per_page": PER_PAGE}, caps[SEARCH_CAPS[kind]], "object", "items")
-            except _Stop as stop:
-                if stop.reason == CODE_SECONDARY and kind == "code":
-                    # Waited and retried in the client, or not retryable, or refused before the
-                    # transport because code search already met the limit: this search only is incomplete.
-                    report["code_search_limited"] += 1
-                    entry["resume_cursor"] = "page=1"
-                    continue
-                if stop.reason not in SEARCH_STOPS:
-                    raise
-                report["search_stops"].add(stop.reason)
-                entry["resume_cursor"] = "page=1"
-                continue
-            if failed or pages.items is None:
-                if not failed:
-                    after_pages(path, pages)
-                    if pages.stopped in SEARCH_STOPS + (CODE_SECONDARY,):
-                        entry["resume_cursor"] = "page=1"
-                    elif pages.stopped is None:
-                        note_error(path, "status")
-                continue
-            before = report["dropped_items"]
-            items, overflow = capped(pages.items, "search")
-            if kind == "code":
-                ids, listed = code_ids(items, path, terms)
-            else:
-                ids, listed = listed_ids(items, path, terms)
-            entry["repository_ids"] = sorted(set(ids))[: schema.MAX_IDS]
-            if terms is not None:
-                entry["filtered_out"] = len(listed) - len(set(ids))
-                report["filtered_out"] += entry["filtered_out"]
-            candidates.update(i for i in entry["repository_ids"] if i not in unnamed)
-            total = pages.extra.get("total_count")
-            incomplete = pages.extra.get("incomplete_results")
-            clean = report["dropped_items"] == before
-            # total_count above the distinct ids listed covers the API's 1000-result ceiling too.
-            # Ids the filter left out were listed: they count here, so a filter never makes a search look cut short.
-            # A code search counts files, several of which may be in one repository: compare with the items listed.
-            seen = len(items) if kind == "code" else len(listed)
-            capped_total = isinstance(total, int) and not isinstance(total, bool) and total > seen
-            entry["complete"] = bool(pages.complete and clean and not overflow and incomplete is not True and not capped_total)
-            if not pages.complete and pages.next_cursor is not None:
-                entry["resume_cursor"] = pages.next_cursor
-            after_pages(path, pages)
+    def run_searches(self):
+        for query_entry in self.config["queries"]:
+            self.search(query_entry)
 
-        for root in config["roots"]:
-            rid, full_name = root["repository_id"], root["full_name"]
-            names.setdefault(rid, full_name)
-            candidates.add(rid)
-            entry = {"repository_id": rid, "full_name": full_name, "forks_scan_complete": False, "found_repository_ids": []}
-            run["roots"].append(entry)
-            path = github.path_for_repo(full_name, "/forks")
-            pages, failed = attempt(path, client.paginate, path, {"per_page": PER_PAGE}, caps["forks"], repository_id=rid)
-            if failed or pages.items is None:
-                if not failed:
-                    after_pages(path, pages)
-                    if pages.stopped is None:
-                        note_error(path, "status")
-                continue
-            before = report["dropped_items"]
-            items, overflow = capped(pages.items, "forks")
-            found, _ = listed_ids(items, path)
-            entry["found_repository_ids"] = list(dict.fromkeys(found))[: schema.MAX_IDS]
-            entry["forks_scan_complete"] = bool(pages.complete and report["dropped_items"] == before and not overflow)
-            if not entry["forks_scan_complete"] and pages.next_cursor is not None:
-                entry["resume_cursor"] = pages.next_cursor
-            candidates.update(entry["found_repository_ids"])
-            after_pages(path, pages)
-
-        # A code search id without a name is fetched when another listing (or the config) named it.
-        candidates.update(rid for rid in unnamed if rid in names)
-        apply_deny()
-        candidates.update(include_ids)
-        ordered = fetch_order(candidates, root_ids | include_ids, last_attempted)
-        if len(ordered) > config["max_repositories"]:
-            report["candidates_truncated"] = True
-            report["not_fetched_repository_ids"].extend(ordered[config["max_repositories"] :])
-            ordered = ordered[: config["max_repositories"]]
-        since = _since(run_at, config["commit_window_days"])
-        for rid in ordered:
-            full_name = names[rid]
-            path = "/repositories/%d" % rid
-            try:
-                result, failed = attempt(path, client.get_json, path, None, "object")
-            except _Stop as stop:
-                if stop.requested:
-                    # The request was made and refused: that is a real failure state.
-                    state = "rate_limited" if stop.reason in ("rate_limited",) + SEARCH_STOPS else "failed"
-                    run["repositories"].append(_empty_repository(rid, full_name, state))
+    def search(self, query_entry):
+        """One search query: its run entry, its pages, and the candidates it lists."""
+        report = self.report
+        query, terms, kind = query_text(query_entry), query_terms(query_entry), query_kind(query_entry)
+        path, bucket_stop = SEARCH_PATHS[kind], KIND_STOPS[kind]
+        entry = {"query": query, "complete": False, "repository_ids": []}
+        if kind == "code":
+            entry["kind"] = "code"
+        if terms is not None:
+            entry["filtered_out"] = 0
+        self.run["searches"].append(entry)
+        if kind == "code" and not self.authenticated:
+            # Code search refuses requests without a token: not asked, and the run is incomplete.
+            entry["skipped"] = "no_token"
+            entry["resume_cursor"] = "page=1"
+            report["skipped_searches"] += 1
+            return
+        if bucket_stop in report["search_stops"]:
+            # This kind's bucket is exhausted: do not ask, record where to resume.
+            entry["resume_cursor"] = "page=1"
+            return
+        try:
+            pages, failed = self.attempt(path, self.client.paginate, path, {"q": query, "per_page": PER_PAGE}, self.caps[SEARCH_CAPS[kind]], "object", "items")
+        except _Stop as stop:
+            if stop.reason == CODE_SECONDARY and kind == "code":
+                # Waited and retried in the client, or not retryable, or refused before the
+                # transport because code search already met the limit: this search only is incomplete.
+                report["code_search_limited"] += 1
+                entry["resume_cursor"] = "page=1"
+                return
+            if stop.reason not in SEARCH_STOPS:
                 raise
-            if failed or result.status != 200:
-                run["repositories"].append(_empty_repository(rid, full_name, "failed" if failed else fetch_state_for(result.status)))
-                continue
-            try:
-                meta, notes = adapt_repository(result.data, rid, path)
-            except github.ResponseError:
-                note_error(path, "shape")
-                run["repositories"].append(_empty_repository(rid, full_name, "failed"))
-                continue
-            for note in notes:
-                note_error(path, note)
-            repo = _empty_repository(rid, meta["full_name"], "ok")
-            repo.update(meta)
-            run["repositories"].append(repo)
-            branch = meta["default_branch"]
-            if branch is not None:
-                cpath = github.path_for_repo(meta["full_name"], "/commits")
-                pages, failed = attempt(cpath, client.paginate, cpath, {"sha": branch, "since": since, "per_page": PER_PAGE}, caps["commits"], repository_id=rid)
-                if not failed and pages.items is not None:
-                    items, overflow = capped(pages.items, "commits")
-                    commits, dropped = adapt_commits(items, cpath)
-                    report["dropped_items"] += dropped
-                    repo["commits"] = commits
-                    repo["commits_complete"] = bool(pages.complete and dropped == 0 and not overflow)
-                    after_pages(cpath, pages)
-                elif not failed and pages.status == EMPTY_REPOSITORY_STATUS:
-                    # GitHub answers 409 for a repository without commits, but a 409 can also mean the
-                    # repository is temporarily unavailable: an empty listing that is not known to be complete.
-                    repo["commits"] = []
-                    repo["commits_complete"] = False
-                    commits_unavailable.add(rid)
-                elif not failed:
-                    after_pages(cpath, pages)
-                    if pages.stopped is None:
-                        note_error(cpath, "status")
-            rpath = github.path_for_repo(meta["full_name"], "/releases")
-            result, failed = attempt(rpath, client.get_json, rpath, {"per_page": RELEASES_PER_PAGE}, "array")
-            if not failed and result.status == 200:
-                items, overflow = capped(result.data, "releases")
-                repo["releases"], dropped = adapt_releases(items, rpath)
-                report["dropped_items"] += dropped
-                if overflow:
-                    note_error(rpath, "overflow")
-            elif not failed:
-                note_error(rpath, "status")
-            dpath = github.path_for_repo(meta["full_name"], "/readme")
-            result, failed = attempt(dpath, client.get_text, dpath, None, config["readme_bytes"])
-            if not failed and result.status == 200:
-                repo["readme_excerpt"] = result.data
-            elif not failed and result.status != 404:
-                note_error(dpath, "status")
+            report["search_stops"].add(stop.reason)
+            entry["resume_cursor"] = "page=1"
+            return
+        if failed or pages.items is None:
+            if not failed:
+                self.after_pages(path, pages)
+                if pages.stopped in SEARCH_STOPS + (CODE_SECONDARY,):
+                    entry["resume_cursor"] = "page=1"
+                elif pages.stopped is None:
+                    self.note_error(path, "status")
+            return
+        self.record_search(entry, kind, terms, path, pages)
+
+    def record_search(self, entry, kind, terms, path, pages):
+        """Fill a search entry from the pages it answered."""
+        report = self.report
+        before = report["dropped_items"]
+        items, overflow = self.capped(pages.items, "search")
+        if kind == "code":
+            ids, listed = self.code_ids(items, path, terms)
+        else:
+            ids, listed = self.listed_ids(items, path, terms)
+        entry["repository_ids"] = sorted(set(ids))[: schema.MAX_IDS]
+        if terms is not None:
+            entry["filtered_out"] = len(listed) - len(set(ids))
+            report["filtered_out"] += entry["filtered_out"]
+        self.candidates.update(i for i in entry["repository_ids"] if i not in self.unnamed)
+        total = pages.extra.get("total_count")
+        incomplete = pages.extra.get("incomplete_results")
+        clean = report["dropped_items"] == before
+        # total_count above the distinct ids listed covers the API's 1000-result ceiling too.
+        # Ids the filter left out were listed: they count here, so a filter never makes a search look cut short.
+        # A code search counts files, several of which may be in one repository: compare with the items listed.
+        seen = len(items) if kind == "code" else len(listed)
+        capped_total = isinstance(total, int) and not isinstance(total, bool) and total > seen
+        entry["complete"] = bool(pages.complete and clean and not overflow and incomplete is not True and not capped_total)
+        if not pages.complete and pages.next_cursor is not None:
+            entry["resume_cursor"] = pages.next_cursor
+        self.after_pages(path, pages)
+
+    # --- phase 2: forks walk ----------------------------------------------------
+
+    def walk_forks(self):
+        for root in self.config["roots"]:
+            self.walk_root(root)
+
+    def walk_root(self, root):
+        """The forks listing of one root."""
+        rid, full_name = root["repository_id"], root["full_name"]
+        self.names.setdefault(rid, full_name)
+        self.candidates.add(rid)
+        entry = {"repository_id": rid, "full_name": full_name, "forks_scan_complete": False, "found_repository_ids": []}
+        self.run["roots"].append(entry)
+        path = github.path_for_repo(full_name, "/forks")
+        pages, failed = self.attempt(path, self.client.paginate, path, {"per_page": PER_PAGE}, self.caps["forks"], repository_id=rid)
+        if failed or pages.items is None:
+            if not failed:
+                self.after_pages(path, pages)
+                if pages.stopped is None:
+                    self.note_error(path, "status")
+            return
+        before = self.report["dropped_items"]
+        items, overflow = self.capped(pages.items, "forks")
+        found, _ = self.listed_ids(items, path)
+        entry["found_repository_ids"] = list(dict.fromkeys(found))[: schema.MAX_IDS]
+        entry["forks_scan_complete"] = bool(pages.complete and self.report["dropped_items"] == before and not overflow)
+        if not entry["forks_scan_complete"] and pages.next_cursor is not None:
+            entry["resume_cursor"] = pages.next_cursor
+        self.candidates.update(entry["found_repository_ids"])
+        self.after_pages(path, pages)
+
+    # --- phase 3: candidates in fetch order ----------------------------------------
+
+    def select_candidates(self, last_attempted):
+        """The candidate ids to fetch, in fetch order, cut to max_repositories."""
+        # A code search id without a name is fetched when another listing (or the config) named it.
+        self.candidates.update(rid for rid in self.unnamed if rid in self.names)
+        self.apply_deny()
+        self.candidates.update(self.include_ids)
+        ordered = fetch_order(self.candidates, self.root_ids | self.include_ids, last_attempted)
+        limit = self.config["max_repositories"]
+        if len(ordered) > limit:
+            self.report["candidates_truncated"] = True
+            self.report["not_fetched_repository_ids"].extend(ordered[limit:])
+            ordered = ordered[:limit]
+        return ordered
+
+    # --- phase 4: repository fetches ---------------------------------------------
+
+    def fetch_repositories(self, ordered):
+        since = _since(self.run_at, self.config["commit_window_days"])
+        for rid in ordered:
+            self.fetch_repository(rid, since)
+
+    def fetch_repository(self, rid, since):
+        """Metadata, then commits, releases and readme of one candidate."""
+        full_name = self.names[rid]
+        path = "/repositories/%d" % rid
+        repositories = self.run["repositories"]
+        try:
+            result, failed = self.attempt(path, self.client.get_json, path, None, "object")
+        except _Stop as stop:
+            if stop.requested:
+                # The request was made and refused: that is a real failure state.
+                state = "rate_limited" if stop.reason in ("rate_limited",) + SEARCH_STOPS else "failed"
+                repositories.append(_empty_repository(rid, full_name, state))
+            raise
+        if failed or result.status != 200:
+            repositories.append(_empty_repository(rid, full_name, "failed" if failed else fetch_state_for(result.status)))
+            return
+        try:
+            meta, notes = adapt_repository(result.data, rid, path)
+        except github.ResponseError:
+            self.note_error(path, "shape")
+            repositories.append(_empty_repository(rid, full_name, "failed"))
+            return
+        for note in notes:
+            self.note_error(path, note)
+        repo = _empty_repository(rid, meta["full_name"], "ok")
+        repo.update(meta)
+        repositories.append(repo)
+        if meta["default_branch"] is not None:
+            self.fetch_commits(repo, since)
+        self.fetch_releases(repo)
+        self.fetch_readme(repo)
+
+    def fetch_commits(self, repo, since):
+        rid = repo["repository_id"]
+        cpath = github.path_for_repo(repo["full_name"], "/commits")
+        query = {"sha": repo["default_branch"], "since": since, "per_page": PER_PAGE}
+        pages, failed = self.attempt(cpath, self.client.paginate, cpath, query, self.caps["commits"], repository_id=rid)
+        if not failed and pages.items is not None:
+            items, overflow = self.capped(pages.items, "commits")
+            commits, dropped = adapt_commits(items, cpath)
+            self.report["dropped_items"] += dropped
+            repo["commits"] = commits
+            repo["commits_complete"] = bool(pages.complete and dropped == 0 and not overflow)
+            self.after_pages(cpath, pages)
+        elif not failed and pages.status == EMPTY_REPOSITORY_STATUS:
+            # GitHub answers 409 for a repository without commits, but a 409 can also mean the
+            # repository is temporarily unavailable: an empty listing that is not known to be complete.
+            repo["commits"] = []
+            repo["commits_complete"] = False
+            self.commits_unavailable.add(rid)
+        elif not failed:
+            self.after_pages(cpath, pages)
+            if pages.stopped is None:
+                self.note_error(cpath, "status")
+
+    def fetch_releases(self, repo):
+        rpath = github.path_for_repo(repo["full_name"], "/releases")
+        result, failed = self.attempt(rpath, self.client.get_json, rpath, {"per_page": RELEASES_PER_PAGE}, "array")
+        if not failed and result.status == 200:
+            items, overflow = self.capped(result.data, "releases")
+            repo["releases"], dropped = adapt_releases(items, rpath)
+            self.report["dropped_items"] += dropped
+            if overflow:
+                self.note_error(rpath, "overflow")
+        elif not failed:
+            self.note_error(rpath, "status")
+
+    def fetch_readme(self, repo):
+        dpath = github.path_for_repo(repo["full_name"], "/readme")
+        result, failed = self.attempt(dpath, self.client.get_text, dpath, None, self.config["readme_bytes"])
+        if not failed and result.status == 200:
+            repo["readme_excerpt"] = result.data
+        elif not failed and result.status != 404:
+            self.note_error(dpath, "status")
+
+    # --- phase 5: the report ----------------------------------------------------
+
+    def finish(self):
+        """Close the report, validate the run and return (run, report)."""
+        run, report = self.run, self.report
+        if report["stopped"] is None and report["search_stops"]:
+            # Both buckets may have run out: the repository search bucket is named first.
+            report["stopped"] = SEARCH_STOP if SEARCH_STOP in report["search_stops"] else CODE_SEARCH_STOP
+        report["search_stopped"] = bool(report["search_stops"])
+        report["search_stops"] = sorted(report["search_stops"])
+        # Code search ids nobody named are recorded in their search but never fetched.
+        report["not_fetched_repository_ids"].extend(sorted(rid for rid in self.unnamed if rid not in self.names))
+        # A stop before the candidates were chosen: still keep denied ids out, and count included ones as not fetched.
+        self.apply_deny()
+        listed = set(r["repository_id"] for r in run["repositories"])
+        unfetched = set(report["not_fetched_repository_ids"]) | ((set(self.candidates) | self.root_ids | self.include_ids) - listed)
+        report["not_fetched_repository_ids"] = sorted(unfetched)[: schema.MAX_IDS]
+        run["repositories"].sort(key=lambda r: r["repository_id"])
+        complete = self.is_complete()
+        run["collection_report"] = {
+            "complete": complete,
+            "stopped": report["stopped"],
+            "error_count": min(report["error_count"], schema.MAX_SAFE_INT),
+            "dropped_items": min(report["dropped_items"], schema.MAX_SAFE_INT),
+            "not_fetched": len(report["not_fetched_repository_ids"]),
+            "requests_made": self.client.requests_made,
+            "filtered_out": min(report["filtered_out"], schema.MAX_SAFE_INT),
+            "denied": report["denied"],
+            "commits_unavailable": len(self.commits_unavailable),
+        }
+        if report["skipped_searches"]:
+            run["collection_report"]["skipped_searches"] = report["skipped_searches"]
+        try:
+            run = schema.validate_run(run)
+        except schema.SchemaError:
+            raise InternalError() from None
+        report["complete"] = complete
+        report["requests"] = list(self.client.log)
+        report["client"] = self.client.summary()
+        return run, report
+
+    def is_complete(self):
+        run, report = self.run, self.report
+        return (
+            report["stopped"] is None
+            and report["error_count"] == 0
+            and report["dropped_items"] == 0
+            and report["skipped_searches"] == 0
+            and not report["not_fetched_repository_ids"]
+            and all(s["complete"] for s in run["searches"])
+            and all(r["forks_scan_complete"] for r in run["roots"])
+            and all(
+                r["fetch_state"] == "ok" and (r["commits_complete"] is not False or r["repository_id"] in self.commits_unavailable)
+                for r in run["repositories"]
+            )
+        )
+
+
+def collect(client, config, run_at, last_attempted=None):
+    """Return (run, report). The run passes schema.validate_run; the report says what did not happen.
+
+    `last_attempted` ({repository id: timestamp}, see last_attempted_from_state)
+    sets the fetch order of the candidates (fetch_order); None orders them
+    newest id first after the roots and included repositories.
+    """
+    config = validate_config(dict(config))
+    schema.TIMESTAMP.check(run_at, "run_at")
+    collection = _Collection(client, config, run_at)
+    try:
+        collection.run_searches()
+        collection.walk_forks()
+        collection.fetch_repositories(collection.select_candidates(last_attempted))
     except _Stop as stop:
         # The search phase handles its own buckets; a search limit raised anywhere else ends the run.
-        report["stopped"] = "rate_limited" if stop.reason in SEARCH_STOPS + (CODE_SECONDARY,) else stop.reason
-
-    if report["stopped"] is None and report["search_stops"]:
-        # Both buckets may have run out: the repository search bucket is named first.
-        report["stopped"] = SEARCH_STOP if SEARCH_STOP in report["search_stops"] else CODE_SEARCH_STOP
-    report["search_stopped"] = bool(report["search_stops"])
-    report["search_stops"] = sorted(report["search_stops"])
-    # Code search ids nobody named are recorded in their search but never fetched.
-    report["not_fetched_repository_ids"].extend(sorted(rid for rid in unnamed if rid not in names))
-    # A stop before the candidates were chosen: still keep denied ids out, and count included ones as not fetched.
-    apply_deny()
-    listed = set(r["repository_id"] for r in run["repositories"])
-    unfetched = set(report["not_fetched_repository_ids"]) | ((set(candidates) | root_ids | include_ids) - listed)
-    report["not_fetched_repository_ids"] = sorted(unfetched)[: schema.MAX_IDS]
-    run["repositories"].sort(key=lambda r: r["repository_id"])
-    complete = (
-        report["stopped"] is None
-        and report["error_count"] == 0
-        and report["dropped_items"] == 0
-        and report["skipped_searches"] == 0
-        and not report["not_fetched_repository_ids"]
-        and all(s["complete"] for s in run["searches"])
-        and all(r["forks_scan_complete"] for r in run["roots"])
-        and all(
-            r["fetch_state"] == "ok" and (r["commits_complete"] is not False or r["repository_id"] in commits_unavailable)
-            for r in run["repositories"]
-        )
-    )
-    run["collection_report"] = {
-        "complete": complete,
-        "stopped": report["stopped"],
-        "error_count": min(report["error_count"], schema.MAX_SAFE_INT),
-        "dropped_items": min(report["dropped_items"], schema.MAX_SAFE_INT),
-        "not_fetched": len(report["not_fetched_repository_ids"]),
-        "requests_made": client.requests_made,
-        "filtered_out": min(report["filtered_out"], schema.MAX_SAFE_INT),
-        "denied": report["denied"],
-        "commits_unavailable": len(commits_unavailable),
-    }
-    if report["skipped_searches"]:
-        run["collection_report"]["skipped_searches"] = report["skipped_searches"]
-    try:
-        run = schema.validate_run(run)
-    except schema.SchemaError:
-        raise InternalError() from None
-    report["complete"] = complete
-    report["requests"] = list(client.log)
-    report["client"] = client.summary()
-    return run, report
+        collection.report["stopped"] = "rate_limited" if stop.reason in SEARCH_STOPS + (CODE_SECONDARY,) else stop.reason
+    return collection.finish()
