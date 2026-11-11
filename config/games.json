@@ -639,6 +639,14 @@
         "civrev"
       ],
       "platform": "PS3"
+    },
+    {
+      "key": "motorstorm-apocalypse",
+      "title": "MotorStorm: Apocalypse",
+      "aliases": [
+        "motorstorm apocalypse"
+      ],
+      "platform": "PS3"
     }
   ]
 }
