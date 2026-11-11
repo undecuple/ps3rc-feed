@@ -445,7 +445,7 @@ test('notice text is built from the feed collection object', () => {
 
   // incomplete, with counts
   const inc = T.noticeText(mk(Object.assign({}, base, { complete: false, stopped: 'rate_limited', not_fetched: 12, error_count: 3 })), t);
-  assert.equal(inc, 'Last collected: 2026-12-01 06:00 UTC. The last collection was incomplete, so some entries and numbers may be missing. Repositories not fetched: 12. Errors: 3.' + tail);
+  assert.equal(inc, 'Last collected: 2026-12-01 06:00 UTC. The last collection was incomplete, so some entries and numbers may be missing. Repositories not fetched: 12 (they keep their previous values and are tried again later). Errors: 3.' + tail);
   common(inc);
   // incomplete, counts unknown
   const incNull = T.noticeText(mk(Object.assign({}, base, { complete: false, not_fetched: null, error_count: undefined })), t);

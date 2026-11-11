@@ -203,3 +203,8 @@ caption { text-align: left; padding: 4px 8px; color: var(--dim); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+.lede { margin: 12px 0 0; color: var(--dim); overflow-wrap: anywhere; }
+.links { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.links a { color: var(--accent); }
+.links a:hover, .links a:focus-visible { background: var(--hover); }
