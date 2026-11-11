@@ -22,26 +22,25 @@
   <section class="notice" aria-label="Notices">
     <p class="badge"><strong>NOT REAL TIME</strong> <span id="notice">The collection time is unknown. The collection state is unknown. Repository metadata comes from GitHub. Game, category and toolkit labels are inferred and may be wrong. This page is not real time. No game files are hosted here.</span></p>
     <p class="disclaimer">Automated, unofficial index. Associations, toolkit detection and activity may be wrong or out of date. A listing does not mean a project is playable, official, safe or endorsed.</p>
-    <p id="statusline" class="statusline">loading...</p>
+    <details id="status" class="status">
+      <summary>details: <span id="statusbrief">loading...</span></summary>
+      <p id="statusline" class="statusline">loading...</p>
+    </details>
   </section>
 
-  <nav class="bar" aria-label="Views and controls">
+  <nav class="bar" aria-label="Views">
     <div class="group" id="views" role="group" aria-label="Views"></div>
-    <div class="group" id="toggles" role="group" aria-label="Controls"></div>
   </nav>
-  <details id="quick" class="quick">
-    <summary>Quick filters and sort</summary>
-    <div class="bar">
-      <div class="group" id="filter-chips" role="group" aria-label="Quick filters"></div>
-      <div class="group" id="sort-chips" role="group" aria-label="Quick sort"></div>
-    </div>
+  <details id="options" class="options">
+    <summary>Filters and options <span id="optcount" class="count" hidden></span></summary>
+    <div class="group" id="toggles" role="group" aria-label="Controls"></div>
+    <div class="group" id="filter-chips" role="group" aria-label="Quick filters"></div>
+    <div class="group" id="sort-chips" role="group" aria-label="Quick sort"></div>
   </details>
 
   <div class="activeline">
     <p id="active"></p>
-    <button type="button" id="clear-filters" class="chip">clear</button>
-  </div>
-  <div class="newline">
+    <button type="button" id="reset-view" class="chip" hidden aria-label="reset view" title="Reset view: clear filters, search and group, and go back to the default sort of this view. Keeps the current view, pause, scroll and the untouched forks setting.">reset</button>
     <p id="newcount" aria-live="polite" aria-atomic="true"></p>
     <button type="button" id="jump" class="chip" hidden>jump to newest</button>
   </div>

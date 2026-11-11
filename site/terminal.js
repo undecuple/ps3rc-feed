@@ -59,7 +59,7 @@
     status: ['status', 'feed freshness and current settings'],
     about: ['about', 'full disclaimer'],
     clear: ['clear', 'clear the output (Ctrl+L)'],
-    reset: ['reset', 'reset filters, view and settings; drop demo events'],
+    reset: ['reset [view]', 'reset filters, view and settings; drop demo events. reset view only clears filters, search, sort and group of the current view'],
   };
   const EXAMPLES = {
     filter: ['filter category:framework status:active', 'filter owner:example time:<7d', 'filter time:>7d stars:>10', 'filter fork:yes game:unknown'],
@@ -569,6 +569,34 @@
 
   // ---------- commands ----------
 
+  // ---------- view defaults ----------
+
+  // Sorts that belong to one view: recent opens by first seen, games by repository count.
+  const VIEW_SORT = { recent: 'first-seen', games: 'repos' };
+  const defaultSort = (view) => ({ key: VIEW_SORT[view] || 'time', dir: 'desc' });
+
+  // The sort after moving from one view to another. The default -time becomes the target view's
+  // default, and a view's own sort (first-seen, repos) does not follow into a view with another
+  // default or none, so the games table never opens sorted by first seen. Any other sort is kept.
+  function sortForView(sort, from, to) {
+    if (from === to) return sort;
+    const target = defaultSort(to);
+    if (sort.key === target.key) return sort;
+    const own = Object.values(VIEW_SORT).includes(sort.key);
+    return own || (sort.key === 'time' && sort.dir === 'desc') ? target : sort;
+  }
+
+  // True when filters, search, sort or group differ from the defaults of the current view.
+  // Pause, scroll and the untouched forks setting are not part of it.
+  function viewChanged(state) {
+    return state.filters.length > 0 || state.search !== '' || state.group !== initialState().group || sortLabel(state.sort) !== sortLabel(defaultSort(state.view));
+  }
+
+  // Clears filters, search and group and restores the view's default sort; everything else is kept.
+  function resetView(state) {
+    return Object.assign({}, state, { filters: [], search: '', group: initialState().group, sort: defaultSort(state.view) });
+  }
+
   // ---------- empty view ----------
 
   const NO_EVENTS_YET = 'No events yet. The next collection compares against this baseline. The table and forks views list the repositories already found.';
@@ -707,14 +735,9 @@
     view(s, args, ctx, o) {
       const v = (args[0] || '').toLowerCase();
       if (!VIEWS.includes(v)) return o.push(err('usage: view ' + VIEWS.join('|')));
-      // Entering the recent view with the default sort switches to newest first seen first.
-      // Entering the games view with the default sort switches to most repositories first, and
-      // leaving it with the repos sort (which only orders games) goes back to the default.
-      // Any other sort the user picked is kept.
-      if (v !== 'games' && s.sort.key === 'repos') s.sort = initialState().sort;
-      const viewSort = { recent: 'first-seen', games: 'repos' }[v];
-      const switched = !!viewSort && s.view !== v && s.sort.key === 'time' && s.sort.dir === 'desc';
-      if (switched) s.sort = { key: viewSort, dir: 'desc' };
+      const next = sortForView(s.sort, s.view, v);
+      const switched = sortLabel(next) !== sortLabel(s.sort);
+      s.sort = next;
       s.view = v;
       o.push(ok('view: ' + v + (switched ? '  sort: ' + sortLabel(s.sort) : '')));
     },
@@ -722,6 +745,12 @@
       fx.push({ type: 'clear' });
     },
     reset(s, args, ctx, o, fx) {
+      const a = (args[0] || '').toLowerCase();
+      if (a === 'view') {
+        Object.assign(s, resetView(s));
+        return o.push(ok('reset view: filters, search, sort and group back to the defaults of the ' + s.view + ' view'));
+      }
+      if (a) return o.push(err('usage: reset [view]'));
       Object.assign(s, initialState());
       fx.push({ type: 'reset' });
       o.push(ok('reset: filters, view, settings and demo events cleared'));
@@ -821,6 +850,8 @@
         return idx === 1 ? plain(VIEWS) : [];
       case 'demo':
         return idx === 1 ? plain(['stop']) : [];
+      case 'reset':
+        return idx === 1 ? plain(['view']) : [];
       case 'help':
         return idx === 1 ? plain(Object.keys(HELP)) : [];
       case 'show':
@@ -876,6 +907,6 @@
     deriveStatus, joinData, matches, dropUntouched, sortRecords, groupRecords, execute, complete,
     historyStep, pushHistory, showLines, activeSummary, sortLabel, fmtTime, hhmm, ago,
     orUnknown, gameLabel, eventTime, compareLabel, noticeText, collectionState, feedStale,
-    emptyMessage, sortRecent, RECENT_NOTE, gamesRows, githubSearchUrl, NO_MATCH_NOTE,
+    emptyMessage, defaultSort, sortForView, viewChanged, resetView, sortRecent, RECENT_NOTE, gamesRows, githubSearchUrl, NO_MATCH_NOTE,
   };
 });
