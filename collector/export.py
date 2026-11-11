@@ -25,6 +25,12 @@ state into the records site/app.js and site/terminal.js read:
 - The only links are repository URLs rebuilt from the validated full name
   (https://github.com/owner/name). Events carry no URL of their own.
 - Unknown values are null, never 0 or "", and every key is always present.
+- A repository's game comes with game_key (the grouping key), game_basis
+  (alias_name, alias_description, alias_readme_title, readme_title,
+  inherited_from_parent, inherited_unverified_copy or null),
+  game_confidence (strong and medium for config/games.json alias matches,
+  low for an unreviewed README heading, which the page may hide) and
+  matched_alias (the alias or name pattern that matched, or null).
 - Nothing is flagged sample.
 - generated_at is the newest applied run's run_at, never the wall clock.
 - The newest MAX_FEED_EVENTS events are kept (the page keeps the same
@@ -70,6 +76,10 @@ def _repo_record(entry):
         "url": text.repository_url(entry["repo"]),
         "description": plain(entry["description"]),
         "game": plain(entry["game"]),
+        "game_key": entry["game_key"],
+        "game_basis": entry["game_basis"],
+        "game_confidence": entry["game_confidence"],
+        "matched_alias": entry["matched_alias"],
         "game_inferred": entry["game_inferred"],
         "game_inherited": entry["game_inherited"],
         "category": entry["category"],

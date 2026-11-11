@@ -64,6 +64,7 @@ def unknown_game():
         "inferred": True,
         "verified": False,
         "inherited_from": None,
+        "matched_alias": None,
     }
 
 
@@ -173,7 +174,7 @@ def record_first_sight(obs, repositories):
     }
 
 
-def own_evidence(obs, repositories):
+def own_evidence(obs, repositories, aliases=None):
     """(category, game, toolkit, copied_from) from the repository's own text.
 
     game is None when the README carries no plausible title of its own,
@@ -202,7 +203,7 @@ def own_evidence(obs, repositories):
         if other is not None and other is not obs and description is not None and description == other["description"]:
             description = None
     readme = obs["readme_excerpt"] if heading is not None else None
-    category, game, toolkit = text.classify(obs["full_name"], description, readme)
+    category, game, toolkit = text.classify(obs["full_name"], description, readme, aliases)
     if category == "framework":
         own_game = unknown_game()
         own_category = "framework"
@@ -218,57 +219,68 @@ def own_evidence(obs, repositories):
     return own_category, own_game, own_toolkit, copied_from
 
 
-def resolve_associations(repositories):
+def _alias_own(game):
+    """True for a game matched by the alias list on the repository's own name or description."""
+    return game is not None and game["basis"] in ("alias_name", "alias_description")
+
+
+def resolve_associations(repositories, aliases=None):
     """Recompute ancestry state, category, game and toolkit for every observation (post-pass).
 
-    Own evidence wins; otherwise the nearest resolved tracked ancestor with
-    evidence is inherited and labelled. Ancestry itself is never changed.
+    Game, strongest first (the walk takes the nearest resolved tracked
+    ancestor):
+    1. the repository's own name or description matches the alias list;
+    2. an ancestor's own alias match, inherited with its matched_alias, so a
+       fork's unreviewed README heading never overrides it;
+    3. the repository's own README title, alias-matched (medium) or not (low);
+    4. the nearest ancestor with any own evidence, inherited and labelled.
+    A framework repository keeps no game. Ancestry itself is never changed.
     Returns {rid: "own" | "inherited"} describing where each game came from.
     """
     for obs in repositories.values():
         obs["ancestry_state"] = ancestry_state(obs, repositories)
     for obs in repositories.values():
         record_first_sight(obs, repositories)
-    own = {rid: own_evidence(obs, repositories) for rid, obs in repositories.items()}
+    own = {rid: own_evidence(obs, repositories, aliases) for rid, obs in repositories.items()}
     origin = {}
     for rid, obs in repositories.items():
         category, game, toolkit, copied_from = own[rid]
         origin[rid] = "own"
-        if game is None or toolkit is None:
-            chain = ancestors(obs, repositories)
+        chain = ancestors(obs, repositories)
+        if category != "framework" and not _alias_own(game):
+            source = next((a for a in chain if own[str(a["repository_id"])][1] is not None and own[str(a["repository_id"])][1]["matched_alias"] is not None), None)
+            if source is None and game is None:
+                source = next((a for a in chain if own[str(a["repository_id"])][1] is not None), None)
+            if source is not None:
+                a_category, a_game, _, _ = own[str(source["repository_id"])]
+                if a_game["key"] is not None:
+                    game = dict(a_game, basis="inherited_from_parent", inherited_from=source["repository_id"])
+                    origin[rid] = "inherited"
+                    category = "game"
+                else:
+                    # A framework ancestor settles the category only; there is no game to inherit.
+                    game = unknown_game()
+                    category = category or a_category
+        if toolkit is None:
             for ancestor in chain:
-                a_category, a_game, a_toolkit, _ = own[str(ancestor["repository_id"])]
-                if game is None and a_game is not None:
-                    if a_game["key"] is not None:
-                        game = dict(a_game, basis="inherited_from_parent", inherited_from=ancestor["repository_id"])
-                        origin[rid] = "inherited"
-                    else:
-                        # A framework ancestor settles the category only; there is no game to inherit.
-                        game = unknown_game()
-                    if category is None:
-                        category = a_category
-                if toolkit is None and a_toolkit is not None:
+                a_toolkit = own[str(ancestor["repository_id"])][2]
+                if a_toolkit is not None:
                     toolkit = dict(a_toolkit, basis="inherited_from_parent", inherited_from=ancestor["repository_id"])
-                if game is not None and toolkit is not None:
                     break
-            if game is None and copied_from is not None and not chain:
-                # Parent untracked; the heading copies the tracked root's: an unverified copy.
-                # Same title rules as the root's own classification.
-                heading = text.game_title(copied_from["full_name"].split("/", 1)[1].lower(), own_heading(copied_from))
+        if game is None and copied_from is not None and not chain:
+            # Parent untracked; the heading copies the tracked root's: an unverified copy.
+            # The root's alias match is carried; otherwise the same title rules as the root's own classification.
+            root_game = own[str(copied_from["repository_id"])][1]
+            if root_game is not None and root_game["matched_alias"] is not None:
+                game = dict(root_game, basis="inherited_unverified_copy", inherited_from=copied_from["repository_id"])
+            else:
+                heading = text.game_title(copied_from["full_name"].split("/", 1)[1].lower(), own_heading(copied_from), text.readme_heading(copied_from["readme_excerpt"]))
                 key = text.slug(heading)
                 if key is not None:
-                    game = {
-                        "key": key,
-                        "title": heading,
-                        "basis": "inherited_unverified_copy",
-                        "confidence": "weak",
-                        "inferred": True,
-                        "verified": False,
-                        "inherited_from": copied_from["repository_id"],
-                    }
-                    origin[rid] = "inherited"
-                    if category is None:
-                        category = "game"
+                    game = dict(unknown_game(), key=key, title=heading, basis="inherited_unverified_copy", confidence="low", inherited_from=copied_from["repository_id"])
+            if game is not None:
+                origin[rid] = "inherited"
+                category = category or "game"
         obs["category"] = category or "unclassified"
         obs["game"] = game if game is not None else unknown_game()
         obs["toolkit"] = toolkit if toolkit is not None else unknown_toolkit()

@@ -21,6 +21,7 @@ def empty_state():
         "last_run_at": None,
         "repositories": {},
         "events": [],
+        "games_list": None,
         "collection": {
             "searches": {},
             "roots": {},

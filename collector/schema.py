@@ -705,16 +705,25 @@ def load_events(events):
 OBSERVED_COMMIT = Obj({"committed_at": TIMESTAMP, "message": Text(MAX_MESSAGE), "first_observed_at": TIMESTAMP})
 OBSERVED_RELEASE = Obj({"tag": Text(MAX_TAG), "published_at": TIMESTAMP, "first_observed_at": TIMESTAMP})
 NAME_HISTORY = Obj({"full_name": FULL_NAME, "owner": OWNER, "until": TIMESTAMP})
+GAME_KEY = Str(pattern=re.compile(r"[a-z0-9-]+\Z"), max_len=64)
+ALIAS_BASES = ("alias_name", "alias_description", "alias_readme_title")
+GAME_BASES = ALIAS_BASES + ("readme_title", "inherited_from_parent", "inherited_unverified_copy")
+# weak: written by collectors before the alias list (a README heading); kept so older states still load.
+GAME_CONFIDENCE = ("strong", "medium", "weak", "low", "unknown")
+MATCHED_ALIAS = Str(max_len=64)
 GAME = Obj(
     {
-        "key": Nullable(Str(pattern=re.compile(r"[a-z0-9-]+\Z"), max_len=64)),
+        "key": Nullable(GAME_KEY),
         "title": Nullable(Text(MAX_TAG)),
-        "basis": Nullable(Enum(("readme_title", "inherited_from_parent", "inherited_unverified_copy"))),
-        "confidence": Enum(("strong", "weak", "unknown")),
+        "basis": Nullable(Enum(GAME_BASES)),
+        "confidence": Enum(GAME_CONFIDENCE),
         "inferred": Bool(),
         "verified": Bool(),
         "inherited_from": Nullable(PositiveId()),
-    }
+        # The config/games.json alias or name pattern that named the game, also when inherited.
+        "matched_alias": Nullable(MATCHED_ALIAS),
+    },
+    optional=("matched_alias",),
 )
 INHERITED_BASES = ("inherited_from_parent", "inherited_unverified_copy")
 TOOLKIT = Obj(
@@ -844,7 +853,10 @@ STATE = Obj(
         "repositories": Map(OBSERVATION, key_pattern=DIGITS_RE, max_items=MAX_REPOSITORIES * 10, max_key_len=20),
         "events": List(EVENT, MAX_IDS * 100),
         "collection": COLLECTION,
-    }
+        # Fingerprint of the config/games.json the last run used; absent or null before the alias list existed.
+        "games_list": Nullable(Str(pattern=re.compile(r"[0-9a-f]{16}\Z"), max_len=16)),
+    },
+    optional=("games_list",),
 )
 
 
@@ -860,6 +872,8 @@ def validate_state(state):
         check_comparison(obs["comparison"], "state.repositories[%r].comparison" % key)
         if (obs["game"]["basis"] in INHERITED_BASES) != (obs["game"]["inherited_from"] is not None):
             raise SchemaError("state.repositories[%r].game: inherited_from and basis disagree" % key)
+        if (obs["game"]["basis"] in ALIAS_BASES) and obs["game"].get("matched_alias") is None:
+            raise SchemaError("state.repositories[%r].game: an alias basis needs matched_alias" % key)
         if obs["game"]["verified"] is not False or obs["game"]["inferred"] is not True:
             raise SchemaError("state.repositories[%r].game: associations are always inferred and unverified" % key)
         if len(set(obs["discovery_roots"])) != len(obs["discovery_roots"]):

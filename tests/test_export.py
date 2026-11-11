@@ -23,7 +23,7 @@ HOSTILE = '<b>&amp;"'
 REPO_KEYS = {
     "id", "repo", "owner", "url", "description", "game", "game_inferred", "game_inherited", "category", "toolkit",
     "fork", "parent", "root", "ahead", "behind", "comparison_state", "stars", "commits_30d", "first_seen_at",
-    "last_commit_at", "archived", "collection_failing",
+    "last_commit_at", "archived", "collection_failing", "game_key", "game_basis", "game_confidence", "matched_alias",
 }
 # The event record keys joinData reads (site/terminal.js lines 257-272).
 EVENT_KEYS = {"id", "type", "repo_id", "source_at", "observed_at", "summary"}
@@ -163,7 +163,7 @@ class ExportTestCase(CollectorTestCase):
         self.assertEqual(set(repo_ids) & set(event_ids), set())  # `show <id>` searches both lists
         for r in feed["repos"]:
             self.assertEqual(set(r), REPO_KEYS)
-            for k in ("repo", "owner", "game", "toolkit", "parent", "root", "comparison_state", "description"):
+            for k in ("repo", "owner", "game", "toolkit", "parent", "root", "comparison_state", "description", "game_key", "game_basis", "game_confidence", "matched_alias"):
                 self.assertTrue(js_str_ok(r[k]), (r["id"], k))
             for k in ("ahead", "behind", "stars", "commits_30d"):
                 self.assertTrue(js_num_ok(r[k]), (r["id"], k))

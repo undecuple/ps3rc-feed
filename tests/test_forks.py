@@ -313,7 +313,7 @@ class T34ThreeRelationships(CollectorTestCase):
         state, _ = self.assertScenarioDeterministic("forks_two_roots", upto=1)
         entry = [c for c in catalog.build_catalog(state) if c["id"] == 301][0]
         self.assertEqual(set(entry["ancestry"]), {"is_fork", "parent_repository_id", "parent", "network_root_repository_id", "root", "state", "fork_discovered"})
-        self.assertEqual(set(entry["game_association"]), {"key", "title", "basis", "inherited_from", "confidence", "inferred", "verified"})
+        self.assertEqual(set(entry["game_association"]), {"key", "title", "basis", "inherited_from", "confidence", "matched_alias", "inferred", "verified"})
         self.assertEqual(set(entry["toolkit_detection"]), {"name", "basis", "inherited_from", "confidence"})
         self.assertEqual(entry["ancestry"]["parent_repository_id"], 100)
         # 301's own README heading differs from its parent's, so the game is its own evidence,

@@ -177,6 +177,29 @@ incomplete commits listing (a page cap, dropped items) still does.
    drop, and say why for every borderline case. Terms describe the game; repository names are not terms.
 4. Update the expectations in `tests/test_sources_config.py` in the same change, and run the tests.
 
+## Game aliases
+
+Game names come from `config/games.json`, a reviewed list of games. Each entry has a `key`, a `title`, `aliases` and
+optionally `name_patterns` and `platform`. An alias matches whole words, ignoring case and accents, in the repository
+name (split on `-`, `_`, `.`, camelCase and between letters and digits), then the description, then the README title;
+the first of these with a match wins, and the longest alias wins inside one of them, so "gow" never matches "gowild"
+and "infamous 2" wins over "infamous". A name pattern must match the whole repository name, `*` standing for one word.
+A match on the name or description has confidence `strong`, on the README title `medium`, and the feed records the
+alias that matched (`matched_alias`). A fork without a match of its own takes its parent's match. A repository that
+matches nothing keeps its first README heading as an unreviewed name with confidence `low`, which the page may hide.
+Changing a repository's label through this list does not create events: `game_association_changed` is reported only
+when the game key changes between two runs that both used the list.
+
+To add a game, open a pull request that adds one entry: aliases that name only this game, written as they appear in
+repository names or descriptions, and a name pattern for a name too short to be a safe alias. The loader refuses
+unknown keys, duplicates (also across entries and spellings), markup, control characters and oversized lists. Then:
+
+1. Run `python3 -B -m collector games` (offline): the file must load.
+2. With a state saved by `export --state-out` under `data/`, run
+   `python3 -B -m collector games --state data/state.json` to print every repository whose label would change. Say
+   why in the pull request for each change that is not obviously the same game.
+3. Update the expectations in `tests/test_games.py` and run the tests.
+
 ## Search terms and the relevance filter
 
 Searching for game names also matches unrelated repositories. A search for a word like "killzone" returns trading

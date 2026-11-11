@@ -20,3 +20,12 @@
   first, then `feed.json`, then `manifest.json`. If a later write fails, the page keeps the previous feed, the next
   export from the saved state publishes this run, and repeating this run is refused instead of being applied twice.
 - `--state-in` and `--state-out` may name the same file only with `--overwrite`.
+- Every repository record carries `game` (the title), `game_key`, `game_basis`, `game_confidence` and
+  `matched_alias`. The basis is `alias_name`, `alias_description` or `alias_readme_title` for a match in
+  `config/games.json` (confidence `strong`, `strong`, `medium`), `readme_title` for an unreviewed README heading
+  (confidence `low`), or `inherited_from_parent` / `inherited_unverified_copy` with the ancestor's confidence and alias.
+  The history snapshot lines do not carry these fields.
+- The feed bytes, and so the manifest `version`, depend on `config/games.json`: a change to the list changes the labels
+  in the next export. The state records the list's fingerprint (`games_list`). A run applied to a state without one
+  (made before the list existed) re-labels silently; afterwards `game_association_changed` is emitted only when a
+  repository's game key changes, never for a move onto an alias match or a new spelling of the same key.

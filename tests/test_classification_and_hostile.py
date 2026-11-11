@@ -106,9 +106,10 @@ class GameTitleTests(CollectorTestCase):
         self.assertIs(game["inferred"], True)
         self.assertIs(game["verified"], False)
 
-    def assertGame(self, full_name, heading, key):
+    def assertGame(self, full_name, heading, key, title=None):
         category, game, _ = self._classify(full_name, heading)
-        self.assertEqual((category, game["key"], game["title"], game["basis"]), ("game", key, heading, "readme_title"), (full_name, heading))
+        expected = ("game", key, title or heading, "readme_title", "low")
+        self.assertEqual((category, game["key"], game["title"], game["basis"], game["confidence"]), expected, (full_name, heading))
         self.assertIs(game["inferred"], True)
         self.assertIs(game["verified"], False)
 
@@ -138,9 +139,10 @@ class GameTitleTests(CollectorTestCase):
                 self.assertUnclassified(full_name, heading)
 
     def test_a_real_title_still_wins(self):
-        self.assertGame("izzy12211/gow-ascension-pc-port", "God of War: Ascension (PS3) Native PC Port", "god-of-war-ascension-ps3-native-pc-port")
-        # Word breaks differ from the name (drakengard-3 vs drakengard3): kept.
-        self.assertGame("some-org/drakengard3-port", "Drakengard 3 Recompiled", "drakengard-3-recompiled")
+        # Suffixes and the (PS3) qualifier are cut; the colon clause is part of the title.
+        self.assertGame("some-org/sky-ascension-pc-port", "Skyfall: Ascension (PS3) Native PC Port", "skyfall-ascension", "Skyfall: Ascension")
+        # Word breaks differ from the name (firefall-3 vs firefall3): kept.
+        self.assertGame("some-org/firefall3-port", "Firefall 3 Recompiled", "firefall-3", "Firefall 3")
         # Only the heading is trimmed: a title shorter than the name is kept.
         self.assertGame("game-org/skyfall-recomp", "Skyfall", "skyfall")
         # A heading made only of suffix words is not a restatement.

@@ -7,15 +7,16 @@
   export --runs FILE... --out-dir D apply run files under data/; write the site's feed.json and manifest.json to D
                                     (--state-in / --state-out carry the store from one export to the next)
   history --feed F --history-dir D  append a feed.json to the history directory D, both under data/ (docs/history.md)
+  games [--state FILE]              check config/games.json; with a saved state, list the labels it would change
 
-Live runs need --max-requests (the effective budget is the smaller of the flag
-and the config's max_requests), GITHUB_TOKEN or --anonymous, --out under data/
-(--overwrite to replace a file) and a config without the example placeholders.
-The run file write path is POSIX only. Every request, guard and write is
-described in the docstrings of collector/github.py, collector/collect.py and the functions below.
+Live runs need --max-requests (the effective budget is the smaller of the flag and the config's max_requests),
+GITHUB_TOKEN or --anonymous, --out under data/ (--overwrite to replace a file) and a config without the example
+placeholders. The run file write path is POSIX only. Every request, guard and write is described in the
+docstrings of collector/github.py, collector/collect.py and the functions below.
 """
 
 import argparse
+import copy
 import errno
 import gzip
 import json
@@ -26,7 +27,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 
-from . import catalog, collect, events, export, github, history, schema, store
+from . import catalog, collect, events, export, forks, games, github, history, schema, store
 from .paths import DATA_ROOT, FIXTURE_ROOT, REPO_ROOT
 
 EXIT_OK = 0
@@ -211,7 +212,37 @@ def build_parser():
         type=int,
         help="gzip the month files more than N months (1-%d) before the last run's month; off when not given" % history.MAX_COMPACT_MONTHS,
     )
+    gam = sub.add_parser("games", help="check config/games.json; with --state, print which repositories would change game label; no network")
+    gam.add_argument("--state", help="state saved by export --state-out (.json under data/) to re-label with the current list; read only")
     return parser
+
+
+def _label(game):
+    return {k: game.get(k) for k in ("key", "title", "basis", "confidence", "matched_alias")}
+
+
+def run_games(args):
+    """Validate config/games.json; with --state, re-resolve a copy of that state's associations and list the changes."""
+    aliases = games.load()
+    payload = {
+        "games": len(aliases.entries),
+        "aliases": sum(len(e["aliases"]) for e in aliases.entries),
+        "name_patterns": sum(len(e.get("name_patterns", [])) for e in aliases.entries),
+        "fingerprint": aliases.fingerprint,
+    }
+    if args.state is not None:
+        state = load_export_state(resolve_state_input(args.state, flag="--state"), flag="--state")
+        repositories = copy.deepcopy(state["repositories"])
+        forks.resolve_associations(repositories, aliases)
+        changes = []
+        for rid in sorted(repositories, key=int):
+            before, after = _label(state["repositories"][rid]["game"]), _label(repositories[rid]["game"])
+            if before != after:
+                changes.append({"id": int(rid), "repo": repositories[rid]["full_name"], "from": before, "to": after})
+        payload["changes"] = changes
+        payload["key_changes"] = sum(1 for c in changes if c["from"]["key"] != c["to"]["key"])
+    _print(payload)
+    return EXIT_OK
 
 
 def _now_utc():
@@ -902,6 +933,8 @@ def main(argv=None):
             return run_export(args)
         if args.command == "history":
             return run_history(args)
+        if args.command == "games":
+            return run_games(args)
         if args.command != "dry-run":
             parser.print_usage(sys.stderr)
             return EXIT_REFUSED
