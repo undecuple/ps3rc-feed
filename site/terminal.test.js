@@ -744,3 +744,61 @@ test('games rows follow the untouched forks rule and cover every repository of t
   assert.equal(names.length, new Set(repos.map((r) => r.game || 'unknown')).size);
   assert.ok(app.includes('cell(tr, g.label);'));
 });
+
+test('default sort per view and the sort after a view change', () => {
+  assert.deepEqual(T.defaultSort('feed'), { key: 'time', dir: 'desc' });
+  assert.deepEqual(T.defaultSort('recent'), { key: 'first-seen', dir: 'desc' });
+  assert.deepEqual(T.defaultSort('games'), { key: 'repos', dir: 'desc' });
+  for (const v of ['table', 'forks', 'about']) assert.deepEqual(T.defaultSort(v), { key: 'time', dir: 'desc' }, v);
+  const S = (key, dir) => ({ key, dir });
+  // a view's own sort does not follow into a view with another default or none
+  assert.deepEqual(T.sortForView(S('first-seen', 'desc'), 'recent', 'games'), S('repos', 'desc'));
+  assert.deepEqual(T.sortForView(S('first-seen', 'asc'), 'recent', 'games'), S('repos', 'desc'));
+  assert.deepEqual(T.sortForView(S('first-seen', 'desc'), 'recent', 'table'), S('time', 'desc'));
+  assert.deepEqual(T.sortForView(S('repos', 'asc'), 'games', 'feed'), S('time', 'desc'));
+  assert.deepEqual(T.sortForView(S('repos', 'desc'), 'games', 'recent'), S('first-seen', 'desc'));
+  // the target's own sort is kept, direction included; the same view keeps everything
+  assert.deepEqual(T.sortForView(S('first-seen', 'asc'), 'table', 'recent'), S('first-seen', 'asc'));
+  assert.deepEqual(T.sortForView(S('time', 'desc'), 'recent', 'recent'), S('time', 'desc'));
+  // the default -time takes the target default; any other user sort is kept
+  assert.deepEqual(T.sortForView(S('time', 'desc'), 'feed', 'games'), S('repos', 'desc'));
+  assert.deepEqual(T.sortForView(S('time', 'asc'), 'feed', 'games'), S('time', 'asc'));
+  assert.deepEqual(T.sortForView(S('stars', 'desc'), 'recent', 'games'), S('stars', 'desc'));
+  // through the commands: recent then games shows the games by repository count
+  const g = run('games', run('recent').state);
+  assert.deepEqual(g.state.sort, S('repos', 'desc'));
+  assert.equal(g.out[0].text, 'view: games  sort: -repos');
+  assert.deepEqual(run('feed', run('recent').state).state.sort, S('time', 'desc'));
+});
+
+test('reset view: shown only when the view differs from its defaults, and clears only that', () => {
+  const base = T.initialState();
+  assert.equal(T.viewChanged(base), false);
+  assert.equal(T.viewChanged(run('recent').state), false);
+  assert.equal(T.viewChanged(run('games').state), false);
+  // pause, scroll and untouched forks are not part of the view
+  let s = run('untouched show', run('scroll manual', run('pause').state).state).state;
+  assert.equal(T.viewChanged(s), false);
+  for (const line of ['filter fork:yes', 'search racer', 'group game', 'sort stars', 'order oldest']) assert.equal(T.viewChanged(run(line).state), true, line);
+  assert.equal(T.viewChanged(run('sort -time', run('recent').state).state), true);
+  // reset view keeps the view, pause, scroll and untouched forks; restores the view's default sort
+  s = run('filter fork:yes', s).state;
+  s = run('search racer', s).state;
+  s = run('group owner', s).state;
+  s = run('recent', s).state;
+  s = run('sort stars', s).state;
+  const r = run('reset view', s);
+  assert.deepEqual(r.state, Object.assign({}, s, { filters: [], search: '', group: 'none', sort: { key: 'first-seen', dir: 'desc' } }));
+  assert.equal(r.state.paused, true);
+  assert.equal(r.state.scroll, 'manual');
+  assert.equal(r.state.hideUntouched, false);
+  assert.deepEqual(r.effects, []);
+  assert.equal(r.out[0].kind, 'ok');
+  assert.equal(T.viewChanged(r.state), false);
+  assert.deepEqual(T.resetView(run('sort stars', run('games').state).state).sort, { key: 'repos', dir: 'desc' });
+  // the input state is not changed; a wrong argument is refused
+  assert.equal(s.filters.length, 1);
+  assert.equal(run('reset nope', s).out[0].kind, 'error');
+  assert.deepEqual(run('reset nope', s).state, s);
+  assert.deepEqual(T.complete('reset v', ctx), { line: 'reset view ', options: [] });
+});

@@ -6,6 +6,9 @@
 //               the page must show that the feed could not be loaded, not throw and not show any data
 // Both served runs also open the recent view at desktop and phone width: rows ordered by first seen,
 // newest first, the first seen note shown, and the First seen heading flips the order.
+// Both served runs also check the controls: the reset control is hidden at the defaults of the current view, shows
+// after a filter or a sort change and puts them back (view, pause kept), the recent and games views open with their
+// own sorts, and at 360px wide, with everything open, nothing scrolls sideways.
 // Both served runs also type a search that matches nothing in each list view at desktop and phone width: a link to
 // GitHub's own repository search appears under the empty message, and goes away for a matching search, a cleared
 // search and the About view.
@@ -175,6 +178,76 @@ for (const [kind, page, search] of runs) {
       if (kind === 'sample') check(r.notice.startsWith('SAMPLE (fictional): '), name + ': sample notice is not labelled');
       else check(!/SAMPLE/.test(r.notice) && r.notice.includes('Repository metadata comes from GitHub.'), name + ': real notice');
       if (!served.collection) check(r.notice.includes('The collection state is unknown.') && !/was complete|was incomplete/.test(r.notice), name + ': feed has no collection object but the notice claims a state');
+    }
+    {
+      // controls: one row of views, the rest under a closed "Filters and options"; the reset control is hidden at the
+      // defaults of the current view, appears after a filter or a sort change, and puts them back without touching
+      // the view, pause or the untouched forks setting
+      const ui = () => evalJs(`(() => {
+        const b = document.getElementById('reset-view');
+        return {
+          resetHidden: b.hidden && b.offsetParent === null, optionsOpen: document.getElementById('options').open,
+          statusOpen: document.getElementById('status').open, count: document.getElementById('optcount').hidden ? '' : document.getElementById('optcount').textContent,
+          active: document.getElementById('active').textContent, view: document.querySelector('#views [aria-current="page"]').textContent,
+          paused: /resume/.test(document.getElementById('toggles').textContent), rows: document.querySelectorAll('#view .row').length,
+        };
+      })()`);
+      const clickChip = (group, text) => evalJs(`[...document.querySelectorAll('#${group} button')].find((b) => b.textContent === ${JSON.stringify(text)}).click()`);
+      const clickReset = async () => { await evalJs("document.getElementById('reset-view').click()"); await sleep(200); };
+      const start = await ui();
+      r.controls = { start };
+      check(start.resetHidden && !start.optionsOpen && !start.statusOpen && start.count === '' && /^filters: none \| sort: -time \| group: none \| \d+ of \d+ shown/.test(start.active), name + ': controls at start ' + JSON.stringify(start));
+      await evalJs("document.querySelector('#options summary').click()");
+      await clickChip('filter-chips', 'category:framework');
+      await sleep(200);
+      const filtered = await ui();
+      check(!filtered.resetHidden && filtered.count === '1 active' && /filters: category:framework/.test(filtered.active), name + ': reset not shown after a filter ' + JSON.stringify(filtered));
+      await clickChip('toggles', 'pause');
+      await clickReset();
+      const afterFilter = await ui();
+      r.controls.afterFilterReset = afterFilter;
+      check(afterFilter.resetHidden && afterFilter.count === '' && afterFilter.rows === r.rowsAtStart && afterFilter.view === 'feed' && afterFilter.paused && /^filters: none \| sort: -time/.test(afterFilter.active), name + ': reset after a filter ' + JSON.stringify(afterFilter));
+      check((await evalJs('document.activeElement.id')) === 'view', name + ': focus after reset is not on the list');
+      await clickChip('toggles', 'resume');
+      await clickChip('sort-chips', 'sort stars');
+      await sleep(200);
+      const sorted = await ui();
+      check(!sorted.resetHidden && /sort: -stars/.test(sorted.active), name + ': reset not shown after a sort change ' + JSON.stringify(sorted));
+      await clickReset();
+      const afterSort = await ui();
+      check(afterSort.resetHidden && /sort: -time/.test(afterSort.active) && afterSort.view === 'feed', name + ': reset after a sort change ' + JSON.stringify(afterSort));
+      // a view's own sort: recent opens by first seen, and games then opens by repository count, not first seen
+      await typeLine('view recent');
+      const recent = await ui();
+      await typeLine('view games');
+      const games = await ui();
+      r.controls.viewSorts = [recent.active, games.active];
+      check(recent.resetHidden && /sort: -first-seen/.test(recent.active) && games.resetHidden && /sort: -repos/.test(games.active), name + ': view default sorts ' + JSON.stringify(r.controls.viewSorts));
+      await typeLine('sort stars');
+      await clickReset();
+      const gamesReset = await ui();
+      check(gamesReset.resetHidden && gamesReset.view === 'games' && /sort: -repos/.test(gamesReset.active), name + ': reset in the games view ' + JSON.stringify(gamesReset));
+      await typeLine('reset');
+      await evalJs("document.getElementById('options').open = false");
+      if (mobile) {
+        // narrowest phone width, everything open: no sideways scroll and no control past the right edge
+        await cmd('Emulation.setDeviceMetricsOverride', { width: 360, height: 780, deviceScaleFactor: 1, mobile: true });
+        await evalJs("document.getElementById('options').open = true; document.getElementById('status').open = true");
+        await typeLine('filter category:framework status:active time:<7d');
+        await sleep(300);
+        r.controls.narrow = await evalJs(`(() => {
+          const out = [...document.querySelectorAll('.term *')].filter((e) => !e.closest('#view, #out') && e.getClientRects().length)
+            .filter((e) => e.getBoundingClientRect().right > window.innerWidth + 0.5).map((e) => e.tagName + '#' + e.id + '.' + e.className);
+          return { scrollWidth: document.documentElement.scrollWidth, bodyScroll: document.body.scrollWidth, innerWidth: window.innerWidth, out };
+        })()`);
+        const n = r.controls.narrow;
+        check(n.innerWidth === 360 && n.scrollWidth <= 360 && n.bodyScroll <= 360 && n.out.length === 0, name + ': horizontal overflow at 360px ' + JSON.stringify(n));
+        await shot('-360-controls');
+        await typeLine('reset');
+        await evalJs("document.getElementById('options').open = false; document.getElementById('status').open = false");
+        await cmd('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile });
+        await sleep(300);
+      }
     }
     if (kind === 'real') {
       const times = await evalJs("[...document.querySelectorAll('#view .row .time')].map(x => x.textContent)");

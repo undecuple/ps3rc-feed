@@ -465,9 +465,12 @@
     const c = ctx();
     const notice = T.noticeText(data, c.now);
     if ($('notice').textContent !== notice) $('notice').textContent = notice;
+    const collected = data ? 'collected ' + T.hhmm(Date.parse(data.generated_at)) + ' UTC (' + T.ago(Date.parse(data.generated_at), c.now) + ')' : '';
     $('statusline').textContent = data
-      ? 'collected ' + T.hhmm(Date.parse(data.generated_at)) + ' UTC (' + T.ago(Date.parse(data.generated_at), c.now) + ') | feed stale: ' + (c.stale ? 'yes' : 'no') + ' | connection: ' + conn + ' | times shown are source times, or collection times when the source gives none, UTC'
+      ? collected + ' | feed stale: ' + (c.stale ? 'yes' : 'no') + ' | connection: ' + conn + ' | times shown are source times, or collection times when the source gives none, UTC'
       : 'connection: ' + conn;
+    // the closed summary keeps what needs attention: a stale feed or a failing connection
+    $('statusbrief').textContent = data ? collected + (c.stale ? ' | feed stale' : '') + (failures ? ' | connection: ' + conn : '') : 'connection: ' + conn;
 
     const views = $('views');
     views.replaceChildren(...T.VIEWS.map((v) => chip(v, () => run('view ' + v), undefined, state.view === v)));
@@ -489,9 +492,11 @@
       return chip(label, () => run('sort ' + next + k), on);
     }));
 
-    const filtered = state.filters.length > 0 || state.search !== '';
+    const active = state.filters.length + (state.search ? 1 : 0);
+    $('optcount').hidden = active === 0;
+    $('optcount').textContent = active + ' active';
     $('active').textContent = 'filters: ' + T.activeSummary(state) + ' | sort: ' + T.sortLabel(state.sort) + ' | group: ' + state.group + (state.view === 'about' ? '' : ' | ' + count + ' of ' + total + ' shown' + (hidden ? ' (' + hidden + ' untouched forks hidden)' : ''));
-    $('clear-filters').disabled = !filtered;
+    $('reset-view').hidden = !T.viewChanged(state);
 
     const msg = state.paused ? held.length + ' new events held (paused)' : unseen > 0 ? unseen + ' new events (scrolled away)' : announce;
     const nc = $('newcount');
@@ -615,10 +620,17 @@
   // ---------- wiring ----------
 
   function init() {
-    $('quick').open = window.matchMedia('(min-width: 761px)').matches;
     $('cmd').addEventListener('keydown', onKey);
     $('cmd').addEventListener('input', onType);
-    $('clear-filters').addEventListener('click', () => run('filter clear'));
+    $('reset-view').addEventListener('click', () => {
+      if (preType !== null) {
+        // a search typed at the prompt is part of what reset clears
+        $('cmd').value = '';
+        preType = null;
+      }
+      run('reset view');
+      $('view').focus(); // the button hides itself, so focus goes to the list
+    });
     $('jump').addEventListener('click', () => {
       const box = $('view');
       box.scrollTop = timeAscending() ? box.scrollHeight : 0;

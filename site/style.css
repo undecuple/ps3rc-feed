@@ -81,7 +81,11 @@ body {
 .badge { border: 1px solid var(--warn); border-left-width: 4px; border-radius: 6px; padding: 6px 10px; }
 .badge strong { color: var(--warn); font-weight: 600; }
 .disclaimer { border-left: 2px solid var(--line); padding-left: 10px; color: var(--dim); }
+.status { margin: 0 0 4px; color: var(--dim); }
+.status summary, .options summary { cursor: pointer; color: var(--dim); width: max-content; max-width: 100%; overflow-wrap: anywhere; }
+.status summary:hover, .options summary:hover { color: var(--fg); }
 .statusline { color: var(--dim); }
+.status .statusline { margin: 4px 0 0; }
 
 .bar { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 4px; }
 .group { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -97,16 +101,16 @@ button, input { font: inherit; color: inherit; }
 }
 .chip:hover { background: var(--hover); color: var(--fg); }
 .chip[aria-pressed="true"], .chip[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: var(--screen); font-weight: 600; }
-.chip:disabled { color: var(--dim); border-style: dashed; cursor: default; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chip:focus-visible, .row:focus-visible { outline-color: #ffffff; }
 
-.activeline, .newline { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 8px; }
-.activeline p, .newline p { margin: 0; overflow-wrap: anywhere; }
-#newcount { color: var(--dim); }
-.quick { margin-top: 6px; }
-.quick summary { cursor: pointer; color: var(--dim); width: max-content; max-width: 100%; }
-
+.activeline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; margin-top: 6px; font-size: 0.85em; color: var(--dim); }
+.activeline p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.activeline .chip { padding: 0 8px; }
+.options { margin-top: 6px; }
+.options[open] { border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px 8px; }
+.options .group { margin-top: 6px; }
+.count { margin-left: 6px; padding: 0 6px; border: 1px solid var(--accent); border-radius: 6px; color: var(--accent); font-size: 0.85em; }
 .view {
   flex: 1 1 320px;
   min-height: 240px;
