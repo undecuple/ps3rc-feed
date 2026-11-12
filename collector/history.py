@@ -116,9 +116,11 @@ FEED_REPO = schema.Obj(
         "last_commit_at": schema.Nullable(_TS),
         "archived": schema.Nullable(schema.Bool()),
         "collection_failing": schema.Bool(),
+        "removed": schema.Bool(),
     },
-    # Feeds exported before config/games.json have no game_key, game_basis, game_confidence or matched_alias.
-    optional=("game_key", "game_basis", "game_confidence", "matched_alias"),
+    # Feeds exported before config/games.json have no game_key, game_basis, game_confidence or matched_alias;
+    # feeds exported before the removed state have no removed.
+    optional=("game_key", "game_basis", "game_confidence", "matched_alias", "removed"),
 )
 
 _EVENT_FIELDS = {

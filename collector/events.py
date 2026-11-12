@@ -510,7 +510,11 @@ def _apply_failure(obs, repo, run_at, config, emitted):
                 obs,
                 run_at,
                 None,
-                "refresh failed %s in a row" % _plural(obs["consecutive_failures"], "time"),
+                (
+                    "no longer found on GitHub for %s in a row (removed or made private; automated, unverified)" % _plural(obs["consecutive_failures"], "check")
+                    if repo["fetch_state"] == "not_found"
+                    else "refresh failed %s in a row" % _plural(obs["consecutive_failures"], "time")
+                ),
                 {
                     "consecutive_failures": obs["consecutive_failures"],
                     "threshold": config.stale_threshold,

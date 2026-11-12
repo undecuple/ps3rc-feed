@@ -366,7 +366,7 @@
     add('h2', 'What "live" means');
     add('p', 'Nothing here is real time. The feed changes only when a new export is published. The page checks a small manifest every 60 seconds (paused in hidden tabs, with backoff on failure) and reloads the feed only when its version changes. Event times are GitHub source times, or collection times when GitHub gives none.');
     add('h2', 'Status values');
-    add('p', 'Statuses describe observed activity only: active (activity in the last 30 days), quiet (older), stale (collection is failing), archived. They say nothing about whether a project works. unknown means missing, never zero.');
+    add('p', 'Statuses describe observed activity only: active (activity in the last 30 days), quiet (older), stale (collection is failing), archived, removed (no longer found on GitHub). They say nothing about whether a project works. unknown means missing, never zero.');
     add('h2', 'Fork and game labels');
     add('p', 'Fork ancestry, inferred game and detected toolkit are separate. A game inherited from a parent is shown as inherited / unverified. Ahead/behind is relative to a recorded ref and time. The games view has one row per game, and its Label column says whether the name was a reviewed alias (strong or medium), an unreviewed heading (low), inherited, inferred, not inferred, or mixed, with counts. Low-confidence names are counted under "' + T.HIDDEN_ROW + '" unless lowconf show is set.');
     add('h2', 'Keys');
@@ -458,7 +458,7 @@
     return b;
   }
 
-  const QUICK_FILTERS = ['category:framework', 'category:game', 'category:tool', 'category:unclassified', 'status:active', 'status:quiet', 'status:stale', 'status:archived', 'fork:yes', 'confidence:reviewed', 'confidence:low', 'time:<24h', 'time:<7d', 'toolkit:ps3recomp'];
+  const QUICK_FILTERS = ['category:framework', 'category:game', 'category:tool', 'category:unclassified', 'status:active', 'status:quiet', 'status:stale', 'status:archived', 'status:removed', 'fork:yes', 'confidence:reviewed', 'confidence:low', 'time:<24h', 'time:<7d', 'toolkit:ps3recomp'];
   const QUICK_SORTS = ['time', 'stars', 'commits', 'owner', 'game', 'first-seen'];
   const DESC_FIRST = ['time', 'stars', 'commits', 'first-seen', 'repos'];
 

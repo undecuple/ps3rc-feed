@@ -152,6 +152,8 @@ def build_entry(state, obs):
         "stale": obs["stale"],
         "partial": obs["partial"],
         "collection_failing": obs["consecutive_failures"] > 0,
+        # Gone from GitHub: not found for as many runs in a row as it takes to emit collection_stale.
+        "removed": obs["collection_state"] == "not_found" and obs["stale_notified"],
         "refreshed_in_last_run": obs["last_attempted_refresh_at"] == state["last_run_at"],
         "collection_state": obs["collection_state"],
         "last_successful_refresh_at": obs["last_successful_refresh_at"],

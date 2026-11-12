@@ -34,3 +34,9 @@
   in the next export. The state records the list's fingerprint (`games_list`). A run applied to a state without one
   (made before the list existed) re-labels silently; afterwards `game_association_changed` is emitted only when a
   repository's game key changes, never for a move onto an alias match or a new spelling of the same key.
+- Every repository record carries `removed`: true when GitHub reported the repository as not found (404 or 410) for as
+  many runs in a row as the stale threshold (3). The page shows status `removed` for it, ahead of `archived` and
+  `stale`. It is not proof: a deleted repository, a deleted account and a repository made private look the same, so the
+  stale event says "no longer found on GitHub ... (removed or made private; automated, unverified)". The collector
+  keeps asking about it every run, one request, so a repository that comes back is picked up and `removed` goes false.
+  A feed made before this field has no `removed` and its failing repositories show as `stale`.
