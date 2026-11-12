@@ -299,7 +299,8 @@
         id: String(e.id),
         repoId: e.repo_id,
         type: e.type,
-        typeLabel: typeLabel(e.type),
+        // A stale notice for a repository the collector reports as removed is shown as REMOVED; the type (and type:stale) stay.
+        typeLabel: e.type === 'collection_stale' && r && r.status === 'removed' ? 'REMOVED' : typeLabel(e.type),
         types: [e.type],
         summary: str(e.summary),
         // events without a source time (discovery events) use their collection time for display, filter and sort

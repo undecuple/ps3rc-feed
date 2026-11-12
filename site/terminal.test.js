@@ -934,3 +934,14 @@ test('a repository the collector reports as removed has status removed, before a
   const state = run('filter status:removed').state;
   assert.equal(state.filters.length, 1);
 });
+
+test('a stale notice for a removed repository is labelled REMOVED, and still has type collection_stale', () => {
+  const mk = (extra) => T.joinData({
+    repos: [Object.assign({ id: 'q1', repo: 'a/b', url: 'https://github.com/a/b', collection_failing: true }, extra)],
+    events: [{ id: 'q2', type: 'collection_stale', repo_id: 'q1', summary: 'no longer found on GitHub for 3 checks in a row (removed or made private; automated, unverified)', observed_at: feed.generated_at }],
+  }, NOW).events[0];
+  assert.equal(mk({ removed: true }).typeLabel, 'REMOVED');
+  assert.equal(mk({ removed: true }).type, 'collection_stale');
+  assert.equal(mk({ removed: false }).typeLabel, 'STALE');
+  assert.equal(mk({}).typeLabel, 'STALE');
+});

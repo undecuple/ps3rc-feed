@@ -40,3 +40,4 @@
   stale event says "no longer found on GitHub ... (removed or made private; automated, unverified)". The collector
   keeps asking about it every run, one request, so a repository that comes back is picked up and `removed` goes false.
   A feed made before this field has no `removed` and its failing repositories show as `stale`.
+  The page labels the stale notice of a removed repository `REMOVED` (its type stays `collection_stale`, so `type:stale` still finds it).
