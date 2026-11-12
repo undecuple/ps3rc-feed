@@ -21,8 +21,9 @@ State is {"format_version": 1, "seen": [...event ids...], "attempts":
 first plan for a feed with no state is a baseline: no messages, and every
 event in the feed becomes seen, so enabling the notifications never posts
 the history. apply_delivery marks the events of delivered messages seen,
-counts a failure against the events of a message that was not delivered and
-gives such an event up (seen, no more sends) after MAX_ATTEMPTS failures.
+counts a failure against the events of a message whose send failed (a message
+not attempted counts nothing) and gives such an event up (seen, no more sends)
+after MAX_ATTEMPTS failures.
 "seen" keeps the newest MAX_SEEN ids in feed order, which is enough because
 a feed holds at most export.MAX_FEED_EVENTS events and an id that left the
 feed cannot come back.
@@ -222,7 +223,8 @@ def plan(feed, state=None):
         messages.append({"kind": "overflow", "event_ids": [e["id"] for e in rest], "payload": _payload(_overflow(rest))})
     if digest:
         messages.append({"kind": DIGEST, "event_ids": [e["id"] for e in digest], "payload": _payload(_digest(digest, repos))})
-    new_state = {"format_version": FORMAT_VERSION, "seen": _trim(state["seen"] + ignored), "attempts": dict(state["attempts"])}
+    attempts = {k: v for k, v in state["attempts"].items() if k in set(ids)}
+    new_state = {"format_version": FORMAT_VERSION, "seen": _trim(state["seen"] + ignored), "attempts": attempts}
     return {"baseline": False, "messages": messages, "state": new_state}
 
 
@@ -231,12 +233,13 @@ def _trim(ids):
 
 
 def apply_delivery(plan_, delivered):
-    """The state after sending: delivered is a list of booleans, one per message of the plan, in order.
+    """The state after sending: delivered is a list with one result per message of the plan, in order.
 
-    Events of a delivered message become seen. Events of a message that was
-    not delivered get one failed attempt and stay unseen so the next plan
-    tries again, until they have MAX_ATTEMPTS failures, when they are given
-    up (seen). The plan's own state is not changed.
+    True: the events of the message become seen. False: its events get one
+    failed attempt and stay unseen so the next plan tries again, until they
+    have MAX_ATTEMPTS failures, when they are given up (seen). None: the
+    message was not attempted (the run stopped before it); its events stay
+    unseen and no attempt is counted. The plan's own state is not changed.
     """
     messages = plan_["messages"]
     if len(delivered) != len(messages):
@@ -245,6 +248,8 @@ def apply_delivery(plan_, delivered):
     seen = list(state["seen"])
     attempts = dict(state["attempts"])
     for message, ok in zip(messages, delivered):
+        if ok is None:
+            continue
         for event_id in message["event_ids"]:
             if ok:
                 attempts.pop(event_id, None)

@@ -42,11 +42,11 @@ real time, and the page shows its own collection time. The last collection may b
 - **Export:** `export` turns run files into the `feed.json` and `manifest.json` the page reads, and can keep its state
   between runs. See [docs/export.md](docs/export.md).
 - **History:** `history` appends each published feed to the `feed-history` branch. See [docs/history.md](docs/history.md).
-- **Discord (planning only):** `discord` prints which Discord messages a feed would produce; nothing is sent. See [docs/discord.md](docs/discord.md).
+- **Discord:** `discord` prints which Discord messages a feed would produce; `discord --send` posts them to the webhook in `DISCORD_WEBHOOK_URL`. Nothing in the workflows calls it yet. See [docs/discord.md](docs/discord.md).
 - **Atom feed:** the deployed site serves `feed.atom` with the newest new repositories and releases. See [site/README.md](site/README.md).
 - **Tests:** offline unit tests in `tests/` run in CI. They block network access.
 
-Not built yet: sending messages to Discord.
+Not built yet: the workflow job that sends to Discord (nothing posts automatically).
 
 ## Using it
 
