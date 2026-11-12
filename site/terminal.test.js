@@ -75,7 +75,7 @@ test('filter fields: game repo owner author category status type toolkit fork ti
 
 test('status describes observed activity only', () => {
   const statuses = new Set(repos.map((r) => r.status));
-  for (const s of statuses) assert.ok(['active', 'quiet', 'stale', 'archived'].includes(s), s);
+  for (const s of statuses) assert.ok(['active', 'quiet', 'stale', 'archived', 'removed'].includes(s), s);
   assert.equal(run('filter status:playable').out[0].kind, 'error');
   assert.equal(run('filter status:verified').out[0].kind, 'error');
   assert.equal(T.deriveStatus({ last_commit_at: new Date(NOW - 29 * 86400000).toISOString() }, NOW), 'active');
@@ -922,4 +922,15 @@ test('details show the game key, basis, confidence and matched alias when presen
   assert.ok(lines.includes('game: ALPHA QUEST [reviewed alias (medium)]   category: unknown'));
   // a feed without the fields has no such line
   assert.ok(!T.showLines(repos[0], NOW).some((l) => typeof l === 'string' && l.startsWith('game key:')));
+});
+
+test('a repository the collector reports as removed has status removed, before archived and stale', () => {
+  const mk = (extra) => T.joinData({ repos: [Object.assign({ id: 'q1', repo: 'a/b', url: 'https://github.com/a/b', collection_failing: true }, extra)], events: [] }, NOW).repos[0];
+  assert.equal(mk({ removed: true }).status, 'removed');
+  assert.equal(mk({ removed: true, archived: true }).status, 'removed');
+  assert.equal(mk({ removed: false }).status, 'stale');
+  assert.equal(mk({}).status, 'stale'); // a feed made before the removed state has no such field
+  assert.equal(mk({ removed: 'yes' }).status, 'stale'); // only the boolean true counts
+  const state = run('filter status:removed').state;
+  assert.equal(state.filters.length, 1);
 });

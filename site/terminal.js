@@ -23,7 +23,7 @@
 
   const ENUMS = {
     category: ['framework', 'game', 'tool', 'unclassified'],
-    status: ['active', 'quiet', 'stale', 'archived'],
+    status: ['active', 'quiet', 'stale', 'archived', 'removed'],
     fork: ['yes', 'no'],
     type: TYPES.map((t) => t.label.toLowerCase()),
     // reviewed: strong or medium
@@ -235,6 +235,7 @@
   };
 
   function deriveStatus(repo, now) {
+    if (repo.removed === true) return 'removed';
     if (repo.archived) return 'archived';
     if (repo.collection_failing) return 'stale';
     const last = ms(repo.last_commit_at);

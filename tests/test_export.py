@@ -23,7 +23,7 @@ HOSTILE = '<b>&amp;"'
 REPO_KEYS = {
     "id", "repo", "owner", "url", "description", "game", "game_inferred", "game_inherited", "category", "toolkit",
     "fork", "parent", "root", "ahead", "behind", "comparison_state", "stars", "commits_30d", "first_seen_at",
-    "last_commit_at", "archived", "collection_failing", "game_key", "game_basis", "game_confidence", "matched_alias",
+    "last_commit_at", "archived", "collection_failing", "removed", "game_key", "game_basis", "game_confidence", "matched_alias",
 }
 # The event record keys joinData reads (site/terminal.js lines 257-272).
 EVENT_KEYS = {"id", "type", "repo_id", "source_at", "observed_at", "summary"}
@@ -167,7 +167,7 @@ class ExportTestCase(CollectorTestCase):
                 self.assertTrue(js_str_ok(r[k]), (r["id"], k))
             for k in ("ahead", "behind", "stars", "commits_30d"):
                 self.assertTrue(js_num_ok(r[k]), (r["id"], k))
-            for k in ("fork", "archived", "collection_failing", "game_inferred", "game_inherited"):
+            for k in ("fork", "archived", "collection_failing", "removed", "game_inferred", "game_inherited"):
                 self.assertTrue(js_bool_ok(r[k]), (r["id"], k))
             for k in ("first_seen_at", "last_commit_at"):
                 self.assertTrue(js_time_ok(r[k]), (r["id"], k))

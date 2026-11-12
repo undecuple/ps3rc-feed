@@ -99,6 +99,7 @@ def _repo_record(entry):
         "last_commit_at": entry["last_commit_at"],
         "archived": entry["archived"],
         "collection_failing": entry["collection_failing"],
+        "removed": entry["removed"],
     }
 
 
