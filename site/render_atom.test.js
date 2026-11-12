@@ -96,3 +96,26 @@ test('the command line writes the file and refuses the wrong arguments', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a release is published at its own time and updated when first seen; a discovery has the observed time for both', () => {
+  const xml = A.render(feedOf([repo(1), repo(2)], [
+    event(1, 'release_published', 30, { source_at: '2026-11-09T08:00:00Z' }),
+    event(2, 'repository_discovered', 10),
+  ]));
+  const [disc, rel] = xml.split('<entry>').slice(1); // newest first
+  assert.ok(rel.includes('<published>2026-11-09T08:00:00Z</published>'));
+  assert.ok(rel.includes('<updated>2026-11-10T11:30:00Z</updated>'));
+  assert.ok(disc.includes('<published>2026-11-10T11:50:00Z</published>'));
+  assert.ok(disc.includes('<updated>2026-11-10T11:50:00Z</updated>'));
+});
+
+test('a source time after the observed time never makes updated earlier than published', () => {
+  const xml = A.render(feedOf([repo(1)], [event(1, 'release_published', 30, { source_at: '2026-11-10T11:59:00Z' })]));
+  assert.ok(xml.includes('<published>2026-11-10T11:59:00Z</published>'));
+  assert.ok(xml.includes('<updated>2026-11-10T11:59:00Z</updated>'));
+});
+
+test('an unusable source time falls back to the observed time', () => {
+  const xml = A.render(feedOf([repo(1)], [event(1, 'release_published', 30, { source_at: 'not a time' })]));
+  assert.ok(xml.includes('<published>2026-11-10T11:30:00Z</published>'));
+});
