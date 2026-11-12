@@ -137,6 +137,12 @@ class PlanTests(CollectorTestCase):
             plan = self.d.plan(bad, seen_state())
             self.assertEqual(plan["messages"], [])
 
+    def test_attempt_counts_of_events_that_left_the_feed_are_dropped(self):
+        f = feed([repo(1)], [event(1, "repository_discovered", 1)])
+        state = seen_state()
+        state["attempts"] = {"repo-1:repository_discovered:1": 1, "gone:event:1": 2}
+        self.assertEqual(self.d.plan(f, state)["state"]["attempts"], {"repo-1:repository_discovered:1": 1})
+
     def test_same_input_same_plan(self):
         f = feed([repo(i) for i in range(1, 9)], [event(i, "repository_discovered", i) for i in range(1, 9)])
         s = seen_state()
@@ -181,6 +187,13 @@ class DeliveryTests(CollectorTestCase):
         self.assertEqual(len(state["attempts"]), 1)
         state = self.d.apply_delivery(self.d.plan(self.f, state), [True])
         self.assertEqual(state["attempts"], {})
+
+    def test_a_message_not_attempted_counts_nothing(self):
+        plan = self.d.plan(self.f, seen_state())
+        state = self.d.apply_delivery(plan, [True, None])
+        self.assertEqual(state["attempts"], {})
+        self.assertEqual(state["seen"], ["repo-1:repository_discovered:1"])
+        self.assertEqual([m["event_ids"] for m in self.d.plan(self.f, state)["messages"]], [["repo-2:repository_discovered:2"]])
 
     def test_results_must_match_the_messages(self):
         with self.assertRaises(ValueError):

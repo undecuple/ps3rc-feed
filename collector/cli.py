@@ -27,7 +27,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 
-from . import catalog, collect, discord, events, export, forks, games, github, history, schema, store
+from . import catalog, collect, discord, discord_send, events, export, forks, games, github, history, schema, store
 from .paths import DATA_ROOT, FIXTURE_ROOT, REPO_ROOT
 
 EXIT_OK = 0
@@ -222,6 +222,8 @@ def build_parser():
     dis = sub.add_parser("discord", help="print the Discord messages a feed.json would send, given the delivery state; reads files under data/, writes nothing, no network")
     dis.add_argument("--feed", required=True, help="feed.json written by export (.json under data/)")
     dis.add_argument("--delivery-state", help="delivery state (.json under data/); without it the plan is a baseline: no messages")
+    dis.add_argument("--send", action="store_true", help="send the planned messages to the webhook in the DISCORD_WEBHOOK_URL environment variable; needs --delivery-state-out; the only mode that reaches the network")
+    dis.add_argument("--delivery-state-out", help="with --send: where to write the new delivery state (.json under data/, replaced)")
     return parser
 
 
@@ -268,19 +270,64 @@ def _read_json_input(value, flag):
 
 
 def run_discord(args):
-    """Print what a feed would send to Discord (collector/discord.py); nothing is sent or written."""
+    """Print what a feed would send to Discord (collector/discord.py); with --send, send it.
+
+    Without --send nothing is sent or written. With --send the delivery
+    state is written to --delivery-state-out whatever happens (even after a
+    failed send, so the failure counts persist), and the webhook address
+    comes only from DISCORD_WEBHOOK_URL: never from an argument, never
+    printed. The state is written once before the first send and again
+    after every message, so a crash loses at most the message in flight.
+    With no --delivery-state the plan is a baseline: nothing is sent, the
+    state is written, the webhook is not needed; it is refused when the
+    output file already exists, and the output may not be the feed (it may
+    be the input state, which is the normal use). Exit 0 when
+    every planned message was delivered (or none was planned), 3 otherwise.
+    """
+    if args.send and args.delivery_state_out is None:
+        raise RefusedInput("refused: --send requires --delivery-state-out")
+    if args.delivery_state_out is not None and not args.send:
+        raise RefusedInput("refused: --delivery-state-out is only used with --send")
+    out_path = resolve_out_path(args.delivery_state_out, overwrite=True, flag="--delivery-state-out") if args.send else None
+    if out_path is not None and os.path.normpath(os.path.join(REPO_ROOT, args.feed)) == out_path:
+        raise RefusedInput("refused: --delivery-state-out is the same file as --feed")
     feed = _read_json_input(args.feed, "--feed")
     delivery = None if args.delivery_state is None else _read_json_input(args.delivery_state, "--delivery-state")
+    if args.send and delivery is None and os.path.lexists(out_path):
+        raise RefusedInput("refused: --delivery-state-out exists but no --delivery-state was given; a baseline would overwrite it")
     try:
         result = discord.plan(feed, delivery)
     except discord.StateError as exc:
         raise RefusedInput("refused: %s" % exc) from None
-    _print({
-        "baseline": result["baseline"],
-        "messages": [{"kind": m["kind"], "event_ids": m["event_ids"], "content": m["payload"]["content"]} for m in result["messages"]],
-        "seen": len(result["state"]["seen"]),
-    })
-    return EXIT_OK
+    summary = {"baseline": result["baseline"], "messages": [{"kind": m["kind"], "event_ids": m["event_ids"], "content": m["payload"]["content"]} for m in result["messages"]]}
+    code = EXIT_OK
+    state = result["state"]
+    sender = None
+    if args.send and result["messages"]:
+        try:
+            sender = discord_send.WebhookSender(discord_send.webhook_path(os.environ.get("DISCORD_WEBHOOK_URL", "")))
+        except discord_send.Refused as exc:
+            raise RefusedInput("refused: %s" % exc) from None
+    if args.send:
+        # Written before anything is sent (so an unwritable path fails first) and again after every message.
+        _write_bytes(json_bytes(state), out_path, overwrite=True, flag="--delivery-state-out")
+    if sender is not None:
+        total = len(result["messages"])
+
+        def save(results):
+            partial = discord.apply_delivery(result, results + [None] * (total - len(results)))
+            _write_bytes(json_bytes(partial), out_path, overwrite=True, flag="--delivery-state-out")
+
+        results, outcomes = discord_send.deliver(result, sender, progress=save)
+        state = discord.apply_delivery(result, results)
+        for entry, outcome in zip(summary["messages"], outcomes):
+            entry["result"] = outcome
+        if not all(r is True for r in results):
+            code = EXIT_PARTIAL
+    summary["seen"] = len(state["seen"])
+    summary["attempts"] = len(state["attempts"])
+    _print(summary)
+    return code
 
 
 def _now_utc():

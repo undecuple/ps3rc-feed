@@ -1,10 +1,11 @@
-# Discord notifications (planning only)
+# Discord notifications
 
-`collector/discord.py` decides which feed events would become Discord messages. It sends nothing: it has no
-network code, no clock and no webhook address, and `python3 -B -m collector discord --feed data/feed.json
+`collector/discord.py` decides which feed events would become Discord messages. It has no network code, no clock
+and no webhook address, and `python3 -B -m collector discord --feed data/feed.json
 [--delivery-state data/discord-state.json]` only prints the plan (it reads the two files and writes nothing).
-Sending, the workflow job and the repository secret are separate steps that need their own review and the
-repository owner's settings; until they exist nothing is posted anywhere.
+`collector/discord_send.py` posts the planned messages, and only `discord --send` reaches it. No workflow calls
+it yet: the job and the repository secret are separate steps that need their own review and the repository
+owner's settings, so nothing is posted automatically.
 
 ## What would be sent
 
@@ -32,3 +33,29 @@ that left the feed cannot return.
 
 The state holds event ids only (already public in the feed). The webhook address is a secret and is never stored
 in it, in the repository or in a log.
+
+## Sending
+
+`python3 -B -m collector discord --feed data/feed.json --delivery-state data/discord-state.json --send
+--delivery-state-out data/discord-state.json`
+
+- The webhook address comes only from the `DISCORD_WEBHOOK_URL` environment variable, never from an argument or a
+  file. It must be exactly `https://discord.com/api/webhooks/<numeric id>/<token>` (no other host, port, user,
+  query or path); otherwise the command refuses (exit 2) with wording that names no part of the address. The address
+  is never printed, logged or stored.
+- With no `--delivery-state` the command writes the baseline state and sends nothing, and needs no webhook. It
+  refuses to do that when the output file already exists (a forgotten `--delivery-state` must not reset the state),
+  and the output may never be the `--feed` file. The output may be the input state, which is the normal use.
+- One verified-TLS POST per message, at least 1 second apart, no redirects, a 20 second socket timeout. A 429 waits
+  its `retry_after` once when that is 30 seconds or less, otherwise the run stops. The first message that is not
+  delivered ends the run; the rest are not attempted.
+- The state is written before the first send (an unwritable path fails first) and again after every message, so a
+  crash or a kill loses at most the message in flight.
+- What counts against an event's 3 attempts: only a 4xx other than 401, 403, 404 and 429 (`failed`: Discord refused
+  that message). A 5xx or a network error (`error`), an exhausted rate limit (`limited`), a rejected webhook (401,
+  403, 404: `rejected`) and messages not attempted count nothing, so an outage or a removed webhook does not use up
+  the retries; the next run tries again, one request at a time.
+- Delivery is at least once: if a timeout hits after Discord took the message, the next run sends it again, so a
+  message can very rarely appear twice.
+- The output lists each message with its result (`ok`, `failed`, `error`, `rejected`, `limited` or `not sent`).
+  Exit 0 when every planned message was delivered or none was planned, 3 otherwise, 2 when refused.
