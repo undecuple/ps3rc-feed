@@ -1,0 +1,133 @@
+name: discord
+
+# Posts new repositories and releases to a Discord channel after a refresh. Nothing runs unless the repository
+# variable DISCORD_ENABLED is 'true'; sending also needs the repository secret DISCORD_WEBHOOK_URL (docs/discord.md).
+#
+# It starts when a refresh run completes successfully, reads the feed the refresh saved on the feed-state branch,
+# and keeps its delivery state on the feed-discord branch (one file, discord-state.json, plain fast-forward pushes).
+# It is a separate workflow so the refresh workflow never holds the webhook address: the secret reaches one step
+# that has no repository token, and the step that pushes has the token and no secret.
+#
+# The first run (no feed-discord branch) is a baseline: it posts nothing and needs no webhook, it only records
+# every event now in the feed as seen, so the history is never posted. A run that cannot deliver every message
+# pushes the state (failure counts persist) and then fails, so it shows red. Delivery is at least once.
+
+on:
+  workflow_run:
+    workflows: [refresh]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: vars.DISCORD_ENABLED == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feed-state
+          path: data/feed-state
+          persist-credentials: false
+      - name: Look for the feed-discord branch
+        id: delivery
+        run: |
+          # Exit 2 means the branch does not exist; any other failure stops the job,
+          # so a network error never starts a new baseline.
+          rc=0
+          git ls-remote --exit-code --heads origin refs/heads/feed-discord > /dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "feed-discord branch found"
+          elif [ "$rc" -eq 2 ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "no feed-discord branch: this run is a baseline"
+          else
+            echo "could not list the remote branches (exit $rc)"
+            exit 1
+          fi
+      - if: steps.delivery.outputs.exists == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feed-discord
+          path: data/discord
+          persist-credentials: false
+      - name: Start the feed-discord branch
+        if: steps.delivery.outputs.exists == 'false'
+        run: |
+          mkdir -p data
+          git init -q -b feed-discord data/discord
+      - name: Check the inputs
+        env:
+          STATE_EXISTS: ${{ steps.delivery.outputs.exists }}
+        run: |
+          if [ ! -f data/feed-state/feed.json ] || [ -L data/feed-state/feed.json ]; then
+            echo "the feed-state branch has no feed.json"
+            exit 1
+          fi
+          if [ "$STATE_EXISTS" = "true" ] && { [ ! -f data/discord/discord-state.json ] || [ -L data/discord/discord-state.json ]; }; then
+            echo "the feed-discord branch has no discord-state.json; stopping instead of starting a new baseline"
+            exit 1
+          fi
+      - name: Send
+        id: send
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATE_EXISTS: ${{ steps.delivery.outputs.exists }}
+        run: |
+          state=()
+          if [ "$STATE_EXISTS" = "true" ]; then
+            state=(--delivery-state data/discord/discord-state.json)
+          fi
+          rc=0
+          python3 -B -m collector discord --feed data/feed-state/feed.json "${state[@]}" \
+            --send --delivery-state-out data/discord/discord-state.json || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          case "$rc" in
+            0) echo "delivery complete" ;;
+            3) echo "delivery incomplete; the state keeps the failure counts" ;;
+            *) echo "delivery refused or failed (exit $rc)"; exit 1 ;;
+          esac
+      - name: Push the delivery state
+        if: steps.send.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd data/discord
+          printf '%s\n' '# feed-discord' '' 'Written by the discord workflow. It holds the delivery state only. Do not edit it by hand.' > README.md
+          git add -A
+          if git diff --cached --quiet; then
+            echo "the delivery state is unchanged; nothing to push"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898299+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Delivery state after run $GITHUB_RUN_ID"
+          # The credential reaches git through environment config, never the remote URL or a command line.
+          basic=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic"
+          # A plain push: a branch that moved since the checkout is not a fast-forward, and the push fails.
+          git push -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" HEAD:refs/heads/feed-discord
+          echo "feed-discord updated"
+      - name: Fail when messages were not delivered
+        if: steps.send.outputs.rc == '3'
+        run: |
+          echo "some messages were not delivered; the next run tries again"
+          exit 1

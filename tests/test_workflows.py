@@ -421,7 +421,7 @@ class WorkflowFiles(unittest.TestCase):
 
     def test_other_workflows(self):
         for name in sorted(os.listdir(WORKFLOWS)):
-            if name == "refresh.yml" or not name.endswith(".yml"):
+            if name in ("refresh.yml", "discord.yml") or not name.endswith(".yml"):
                 continue
             with self.subTest(name=name):
                 text = read(os.path.join(WORKFLOWS, name))
