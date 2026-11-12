@@ -59,3 +59,22 @@ in it, in the repository or in a log.
   message can very rarely appear twice.
 - The output lists each message with its result (`ok`, `failed`, `error`, `rejected`, `limited` or `not sent`).
   Exit 0 when every planned message was delivered or none was planned, 3 otherwise, 2 when refused.
+
+## The workflow
+
+`.github/workflows/discord.yml` is a separate workflow from the refresh, so the refresh never holds the webhook
+address. It does nothing unless the repository variable `DISCORD_ENABLED` is `true`.
+
+- It starts when a refresh run completes successfully on `main`, and reads `feed.json` from the `feed-state` branch.
+  A refresh that failed or was skipped posts nothing.
+- The delivery state is the one file `discord-state.json` on the `feed-discord` branch, updated with plain
+  fast-forward pushes (never a force push). Runs never overlap (own concurrency group).
+- The first run has no `feed-discord` branch: it is a baseline. It posts nothing, needs no webhook and records every
+  event now in the feed as seen, so the history is never posted.
+- The webhook secret `DISCORD_WEBHOOK_URL` is an environment value of the one step that sends. That step has no
+  repository token; the step that pushes the state has the token and no secret.
+- A run that cannot deliver every message still pushes the state (so the failure counts persist) and then fails, so
+  it shows red; the next refresh tries again. A rejected or missing webhook refuses before anything is sent and
+  leaves the state as it was. If the state push fails after messages were sent, the next run may send them again.
+- Turning it on is two settings by the maintainer: create the secret, then set the variable. Setting the variable
+  alone only records the baseline. A removed variable stops the workflow; the `feed-discord` branch keeps the state.
