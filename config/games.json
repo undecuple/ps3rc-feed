@@ -647,6 +647,31 @@
         "motorstorm apocalypse"
       ],
       "platform": "PS3"
+    },
+    {
+      "key": "ico",
+      "title": "ICO",
+      "aliases": [
+        "ico recomp"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "mag",
+      "title": "MAG",
+      "aliases": [
+        "mag recomp"
+      ],
+      "platform": "PS3"
+    },
+    {
+      "key": "j-stars-victory-vs",
+      "title": "J-Stars Victory VS+",
+      "aliases": [
+        "jsp vs ex",
+        "j stars victory vs"
+      ],
+      "platform": "PS3"
     }
   ]
 }
