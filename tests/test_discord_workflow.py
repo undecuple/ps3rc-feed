@@ -148,7 +148,7 @@ class DiscordWorkflow(unittest.TestCase):
 
     def test_checks_fail_on_broken_copies(self):
         mutations = [
-            ("unpinned", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@v7"),
+            ("unpinned", tw.pinned("checkout", self.text), "actions/checkout@v7"),
             ("trigger", "  workflow_run:\n", "  workflow_run:\n    branches: [x]\n"),
             ("push trigger", "on:\n", "on:\n  push:\n"),
             ("pull_request_target", "on:\n", "on:\n  pull_request_target:\n"),

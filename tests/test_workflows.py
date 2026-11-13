@@ -491,10 +491,22 @@ class WorkflowFiles(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, "site", "tools", "render_static.js")))
 
 
+def pinned(action, text=None):
+    """The pinned reference of an action as the workflow has it now, such as actions/checkout@<40 hex>.
+
+    The mutations read it from the file instead of repeating a sha, so a pin bump does not break them.
+    """
+    text = read(REFRESH) if text is None else text
+    found = re.search(r"actions/%s@[0-9a-f]{40}" % re.escape(action), text)
+    if not found:
+        raise AssertionError("no pinned %s in the workflow" % action)
+    return found.group(0)
+
+
 # Each mutation breaks one rule in the refresh workflow; the checks must then report a problem.
 MUTATIONS = [
-    ("unpinned action", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@v7"),
-    ("short sha", "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97", "actions/setup-python@5fda3b9"),
+    ("unpinned action", pinned("checkout"), "actions/checkout@v7"),
+    ("short sha", pinned("setup-python"), pinned("setup-python")[:len("actions/setup-python@") + 7]),
     ("top permissions", "permissions:\n  contents: read\n\nconcurrency", "permissions:\n  contents: write\n\nconcurrency"),
     ("top permissions extra", "permissions:\n  contents: read\n\n", "permissions:\n  contents: read\n  pages: write\n\n"),
     ("pull_request_target", "  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request_target:\n"),
