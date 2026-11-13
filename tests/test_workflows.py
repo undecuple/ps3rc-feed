@@ -224,8 +224,8 @@ def check_schedule(text):
         return ["cron does not have five fields"]
     if not re.fullmatch(r"[0-9]{1,2}", fields[0]) or not 1 <= int(fields[0]) <= 59:
         problems.append("cron minute is not a fixed nonzero minute")
-    if fields[1:] != ["*/6", "*", "*", "*"]:
-        problems.append("cron is not once every 6 hours")
+    if fields[1:] != ["*", "*", "*", "*"]:
+        problems.append("cron is not once every hour")
     return problems
 
 
@@ -536,8 +536,9 @@ MUTATIONS = [
     ("export without config", " --stale-after-minutes 1500 \\\n              --config config/sources.json\n", " --stale-after-minutes 1500\n"),
     ("first export without config", " --stale-after-minutes 1500 --config config/sources.json\n", " --stale-after-minutes 1500\n"),
     ("export with another config", "--stale-after-minutes 1500 --config config/sources.json", "--stale-after-minutes 1500 --config config/sources.example.json"),
-    ("zero minute", '"17 */6 * * *"', '"0 */6 * * *"'),
-    ("every hour", '"17 */6 * * *"', '"17 * * * *"'),
+    ("zero minute", '"17 * * * *"', '"0 * * * *"'),
+    ("every 30 minutes", '"17 * * * *"', '"17,47 * * * *"'),
+    ("every 6 hours", '"17 * * * *"', '"17 */6 * * *"'),
     ("persisted credentials", "          ref: main\n          persist-credentials: false\n", "          ref: main\n"),
     ("cancel in progress", "  group: refresh\n  cancel-in-progress: false", "  group: refresh\n  cancel-in-progress: true"),
     ("dispatch input", "  workflow_dispatch:\n", "  workflow_dispatch:\n    inputs:\n      budget:\n        default: '900'\n"),
