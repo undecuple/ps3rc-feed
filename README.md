@@ -2,11 +2,11 @@
   <img src="docs/assets/banner@2x.png" width="1280" alt="ps3rc-feed: automated, unofficial PS3 recompilation activity feed">
 </p>
 
-# ps3rc-feed
+<h1 align="center">ps3rc-feed</h1>
 
-An automated, unofficial activity feed for PS3 recompilation projects on GitHub.
+<p align="center">An automated, unofficial activity feed for PS3 recompilation projects on GitHub.</p>
 
-<p>
+<p align="center">
   <a href="https://github.com/undecuple/ps3rc-feed/actions/workflows/tests.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/undecuple/ps3rc-feed/tests.yml?branch=main&label=tests&style=flat-square&labelColor=161b22"></a>
   <a href="https://github.com/undecuple/ps3rc-feed/actions/workflows/pages.yml"><img alt="pages" src="https://img.shields.io/github/actions/workflow/status/undecuple/ps3rc-feed/pages.yml?branch=main&label=pages&style=flat-square&labelColor=161b22"></a>
   <a href="https://undecuple.github.io/ps3rc-feed/"><img alt="live page" src="https://img.shields.io/badge/live%20page-open-7ee787?style=flat-square&labelColor=161b22"></a>
@@ -15,9 +15,18 @@ An automated, unofficial activity feed for PS3 recompilation projects on GitHub.
   <a href="https://deepwiki.com/undecuple/ps3rc-feed"><img alt="DeepWiki" src="https://img.shields.io/badge/DeepWiki-undecuple%2Fps3rc--feed-7ee787?style=flat-square&labelColor=161b22"></a>
 </p>
 
-**Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data, refreshed every hour by a
-scheduled job when that is enabled, and otherwise published by hand. It is not
-real time, and the page shows its own collection time. The last collection may be incomplete, and the page says so.
+<p align="center">
+  <a href="https://undecuple.github.io/ps3rc-feed/">Live page</a> ·
+  <a href="#what-it-is-and-is-not">What it is</a> ·
+  <a href="#limits">Limits</a> ·
+  <a href="#corrections-removals-and-security">Corrections</a> ·
+  <a href="#using-it">Using it</a>
+</p>
+
+---
+
+**Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data. A scheduled job refreshes it
+every hour when that job is enabled; otherwise the data is published by hand. The page shows its own collection time.
 
 ## What it is and is not
 
@@ -27,6 +36,28 @@ real time, and the page shows its own collection time. The last collection may b
   Follow the link and read the project's own pages.
 - It reports observed repository activity from public GitHub data, not game compatibility or project quality.
 - It does not host game files, binaries or builds.
+
+## Limits
+
+- It is not real time. GitHub starts scheduled jobs when it can, so a refresh can start late or be skipped.
+- One refresh makes at most 800 requests. A busy refresh may not reach every repository, and the page says when a
+  collection is incomplete.
+- Game names, toolkits and descriptions are guesses from public text. Some are wrong.
+- A repository that GitHub no longer returns for three refreshes in a row is marked removed. The cause is unknown:
+  it may be deleted, made private or renamed.
+- GitHub can stop a scheduled job in a public repository after 60 days without repository activity. Whether the
+  job's own commits to the data branches count is not documented. If the page stops updating, the maintainer
+  can re-enable the job in the Actions tab.
+- It collects public GitHub metadata only. It does not check licences, builds or whether a project works.
+
+## Corrections, removals and security
+
+This is an independent index and is not affiliated with the projects it lists. To correct a game label, ask to
+remove a listing, or report a problem, open an issue on
+[undecuple/me](https://github.com/undecuple/me/issues) or write to undecuple@proton.me. Do not put a security
+report in a public issue; see [SECURITY.md](SECURITY.md).
+
+---
 
 ## What exists
 
@@ -47,6 +78,8 @@ real time, and the page shows its own collection time. The last collection may b
 - **Tests:** offline unit tests in `tests/` run in CI. They block network access.
 
 Nothing posts to Discord until the maintainer creates the `DISCORD_WEBHOOK_URL` secret and sets `DISCORD_ENABLED` to `true`.
+
+---
 
 ## Using it
 
@@ -90,6 +123,8 @@ a run is never published. The live write path uses POSIX file operations, so it 
 
 `config/sources.example.json` holds fictional placeholders only. `config/sources.json` holds the reviewed roots and
 search queries.
+
+---
 
 ## Sources config
 
@@ -212,6 +247,8 @@ scripts, class projects and profile pages next to the few repositories about the
 `require_any` terms, and only results whose name or description contains one of them are kept. The rules are in
 "Sources config" above.
 
+---
+
 ## Scheduled refresh
 
 `.github/workflows/refresh.yml` refreshes the feed on GitHub runners with the built-in token. It runs only when the
@@ -249,6 +286,8 @@ branch, then deploy it by starting the `pages` workflow by hand (Actions tab, `p
 serves the `feed-state` feed when it passes the same checks. A push to `main` deploys the page with the feed from `feed-state` when that feed matches its manifest, and
 with the committed `site/data/` otherwise.
 
+---
+
 ## History
 
 The `feed-history` branch keeps every event the feed has shown. It also keeps each change of a repository's name,
@@ -257,10 +296,14 @@ month. History is written only when the scheduled refresh runs. The `history` co
 refresh job pushes the result with normal commits. The format, the size limits and the rotation rules are in
 [docs/history.md](docs/history.md).
 
+---
+
 ## How AI was used
 
-Most of the code, tests and documentation were written with AI agent assistance (Claude Code). Changes go through
-review and CI before they are merged, and the page labels what the data is.
+Most of the code, tests and documentation were developed with AI agent assistance under the maintainer's direction.
+A person reviews each change, and it must pass CI before it is merged. The page labels what the data is.
+
+---
 
 ## Related projects
 
