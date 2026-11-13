@@ -96,17 +96,17 @@ The limits above keep the branch inside that.
 ## Why the branch stays small
 
 Measured on the current `site/data/feed.json`: a snapshot line is about 170 bytes and an event line about 200
-bytes. With about 400 repositories and 4 runs a day (about 120 runs a month):
+bytes. With about 400 repositories and 24 runs a day (about 720 runs a month):
 
-- Full snapshots would be 400 x 170 bytes = 68 KB a run, about 8 MB a month and about 100 MB a year.
+- Full snapshots would be 400 x 170 bytes = 68 KB a run, about 49 MB a month and about 590 MB a year.
 - Change-only snapshots store only what changed. Stars change rarely, and `commits_30d` changes when commits enter
   or leave the 30-day window. If about 160 repositories change a day, that is about 27 KB a day, under 1 MB a
-  month. Even if 250 active repositories changed in every run, a month would be about 5 MB. Run headers add about
-  12 KB a month.
+  month. Even if 250 active repositories changed in every run, a month would be about 31 MB. Run headers add about
+  70 KB a month.
 - Events: 10 to 60 new events a day at 200 bytes are 60 to 360 KB a month.
 
-So a month is usually 1 to 2 MB of files and at most about 6 MB, far under the 50 MB file limit, and a year is
-roughly 12 to 25 MB. Gzip makes a compacted month about 7 times smaller.
+So a month is usually 1 to 3 MB of files and at most about 31 MB, under the 50 MB file limit, and a year is
+roughly 12 to 36 MB when few repositories change per run (the worst case above would be about 370 MB). Gzip makes a compacted month about 7 times smaller.
 
 Git keeps every version of a file. Each run rewrites the current month files, but the commits only append lines,
 so git stores the versions as small deltas in its packs. The history of a month costs about its final size,

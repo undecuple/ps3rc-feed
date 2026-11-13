@@ -15,7 +15,7 @@ An automated, unofficial activity feed for PS3 recompilation projects on GitHub.
   <a href="https://deepwiki.com/undecuple/ps3rc-feed"><img alt="DeepWiki" src="https://img.shields.io/badge/DeepWiki-undecuple%2Fps3rc--feed-7ee787?style=flat-square&labelColor=161b22"></a>
 </p>
 
-**Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data, refreshed every 6 hours by a
+**Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data, refreshed every hour by a
 scheduled job when that is enabled, and otherwise published by hand. It is not
 real time, and the page shows its own collection time. The last collection may be incomplete, and the page says so.
 
@@ -218,7 +218,7 @@ scripts, class projects and profile pages next to the few repositories about the
 repository variable `REFRESH_ENABLED` is `true`. Until the maintainer sets it, every job is skipped and the page keeps
 the data published by hand.
 
-When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand from the Actions tab. One run:
+When it runs, it starts every hour at 17 minutes past the hour, or by hand from the Actions tab. One run:
 
 1. Collects with `--max-requests 800`.
 2. Exports on top of the state saved by the previous run.
@@ -232,8 +232,8 @@ When it runs, it starts every 6 hours at 17 minutes past the hour, or by hand fr
 6. Adds the run to the `feed-history` branch, on a first run too. This job runs beside steps 4 and 5, and its
    failure does not stop them.
 
-A run makes at most 800 requests, and four runs a day make at most 3,200. Scheduled runs start 6 hours apart and
-never overlap, so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
+A run makes at most 800 requests, and 24 runs a day make at most 19,200. Scheduled runs start an hour apart and
+never overlap (a run takes about 6 minutes), so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
 by hand adds up to 800 more, and the collector stops when it reaches a rate limit.
 
 Code search on the Actions token: its secondary limit is observed, not documented. GitHub publishes no figure for

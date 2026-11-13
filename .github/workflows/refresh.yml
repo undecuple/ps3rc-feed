@@ -1,12 +1,12 @@
 name: refresh
 
-# Collects a new run every 6 hours, keeps the export state on the feed-state branch and deploys the page.
+# Collects a new run every hour, keeps the export state on the feed-state branch and deploys the page.
 # Nothing runs unless the repository variable REFRESH_ENABLED is 'true'.
 #
 # Request budget: one run makes at most 800 collector requests (--max-requests 800, also the config's
-# max_requests). Four runs a day are at most 3,200 requests a day. Scheduled runs are 6 hours apart and never
-# overlap (concurrency below), so one hour holds at most one of them, under the built-in token's 1,000
-# requests an hour. A run started by hand adds up to 800 more; the collector stops on a rate limit.
+# max_requests). 24 runs a day are at most 19,200 requests a day. Scheduled runs are an hour apart, a run takes about
+# 6 minutes and runs never overlap (concurrency below), so an hour holds at most one of them, under the built-in
+# token's 1,000 requests an hour. A run started by hand adds up to 800 more; the collector stops on a rate limit.
 #
 # Publishing guard: the collect job fails, after printing the reason, when the run stopped for anything but
 # the request budget (rate_limited, search_rate_limited, code_search_rate_limited, network, unauthorized) or the exported
@@ -20,7 +20,7 @@ name: refresh
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
