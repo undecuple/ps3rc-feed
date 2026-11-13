@@ -33,6 +33,20 @@ const profile = mkdtempSync(join(tmpdir(), 'ps3rc-check-'));
 
 // temporary site copies
 const work = mkdtempSync(join(tmpdir(), 'ps3rc-site-'));
+
+// Stop the browser and remove both temporary folders however the script ends: a normal finish, a thrown
+// error, or a signal. Without this a failed run leaves the browser running and its profile in the temp folder.
+let browser = null;
+function cleanup() {
+  // the browser leads its own process group, so one signal stops it and its helper processes
+  try { if (browser) process.kill(-browser.pid, 'SIGKILL'); } catch {}
+  // the browser's helper processes need a moment to stop writing into the profile, so retry the removal
+  for (const dir of [profile, work]) {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch {}
+  }
+}
+process.on('exit', cleanup);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(130));
 const skip = (src) => !src.startsWith(join(root, 'shots')) && !src.startsWith(join(root, 'testdata'));
 const sampleDir = join(work, 'sample');
 const realDir = join(work, 'real');
@@ -85,7 +99,8 @@ const sampleSrv = await serve(sampleDir);
 const realSrv = await serve(realDir);
 const noEventsSrv = await serve(noEventsDir);
 const aliasSrv = await serve(aliasDir);
-const chrome = spawn(bin, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank', ...flags], { stdio: 'ignore' });
+const chrome = spawn(bin, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank', ...flags], { stdio: 'ignore', detached: true });
+browser = chrome;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function wsUrl() {
