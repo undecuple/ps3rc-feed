@@ -1,23 +1,23 @@
 {
  "files": {
   "events/2026-11.jsonl": {
-   "bytes": 292449,
+   "bytes": 298734,
    "compressed": false,
-   "lines": 1298,
-   "sha256": "8b0c847860b1487be8c7dcfc5d5ee39219d1fbe54252f682e87a47db1d830c14"
+   "lines": 1323,
+   "sha256": "040206933653981774ad5c204be52c8e98ed04dd6590f63bf4807633d382c649"
   },
   "snapshots/2026-11.jsonl": {
-   "bytes": 328317,
+   "bytes": 338586,
    "compressed": false,
-   "lines": 1915,
-   "sha256": "9da017991c4eb73aa040db701f940c523c6d9752652bff5070cd3f5326c75103"
+   "lines": 1974,
+   "sha256": "6fdab60b9abe4d7ac859ddaae91190a57fb8634809a80c5fe1c826579b83f829"
   }
  },
  "format_version": 1,
- "last_run_at": "2026-11-19T11:52:13Z",
+ "last_run_at": "2026-11-19T20:46:37Z",
  "months": [
   "2026-11"
  ],
- "runs": 28,
- "total_bytes": 620766
+ "runs": 29,
+ "total_bytes": 637320
 }
