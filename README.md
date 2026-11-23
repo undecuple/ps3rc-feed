@@ -72,6 +72,7 @@ report in a public issue; see [SECURITY.md](SECURITY.md).
   is labelled inherited and unverified.
 - **Export:** `export` turns run files into the `feed.json` and `manifest.json` the page reads, and can keep its state
   between runs. See [docs/export.md](docs/export.md).
+- **Code map:** layers, data flow, entry points and the test map are in [docs/architecture.md](docs/architecture.md).
 - **History:** `history` appends each published feed to the `feed-history` branch. See [docs/history.md](docs/history.md).
 - **Discord:** `discord` prints which Discord messages a feed would produce; `discord --send` posts them to the webhook in `DISCORD_WEBHOOK_URL`. `.github/workflows/discord.yml` runs it after each refresh, only when the repository variable `DISCORD_ENABLED` is `true`. See [docs/discord.md](docs/discord.md).
 - **Atom feed:** the deployed site serves `feed.atom` with the newest new repositories and releases. See [site/README.md](site/README.md).
