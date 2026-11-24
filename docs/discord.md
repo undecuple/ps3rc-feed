@@ -3,9 +3,10 @@
 `collector/discord.py` decides which feed events would become Discord messages. It has no network code, no clock
 and no webhook address, and `python3 -B -m collector discord --feed data/feed.json
 [--delivery-state data/discord-state.json]` only prints the plan (it reads the two files and writes nothing).
-`collector/discord_send.py` posts the planned messages, and only `discord --send` reaches it. No workflow calls
-it yet: the job and the repository secret are separate steps that need their own review and the repository
-owner's settings, so nothing is posted automatically.
+`collector/discord_send.py` posts the planned messages, and only `discord --send` reaches it.
+`.github/workflows/discord.yml` calls it after each refresh, but only when the repository variable `DISCORD_ENABLED`
+is `true` and the repository secret `DISCORD_WEBHOOK_URL` exists. Both are the repository owner's settings, so
+nothing is posted until the owner sets them.
 
 ## What would be sent
 
