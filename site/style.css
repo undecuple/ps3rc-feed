@@ -30,7 +30,7 @@
 }
 
 * { box-sizing: border-box; }
-html { background: var(--ground); }
+html { background: var(--ground); color-scheme: dark; }
 body {
   margin: 0;
   padding: 16px;
@@ -153,6 +153,8 @@ caption { text-align: left; padding: 4px 8px; color: var(--dim); }
 .tablenote { margin: 0; padding: 6px 8px 0; color: var(--dim); overflow-wrap: anywhere; }
 .recent table { min-width: 0; }
 .recent .firstseen { white-space: nowrap; }
+.recent td a { color: var(--accent); }
+.recent td a:visited { color: var(--accent); }
 .recent td { overflow-wrap: anywhere; }
 
 .about { padding: 4px 12px; max-width: 80ch; }
@@ -200,6 +202,13 @@ caption { text-align: left; padding: 4px 8px; color: var(--dim); }
   .recent tr > :nth-child(4) { grid-column: 3; grid-row: 1; text-align: right; }
   .recent tr > :nth-child(5) { grid-column: 1 / -1; grid-row: 3; color: var(--dim); }
   .recent th:nth-child(5), .recent td.desc:empty { display: none; }
+  /* The static list has six cells a row (repository, game, kind, first seen, last commit, stars), not the
+     interactive table's five, so it is stacked as plain lines and each cell names itself. */
+  .recent.static thead { display: none; }
+  .recent.static tr { display: block; padding: 2px 8px; }
+  .recent.static td { display: inline; padding: 0; margin-right: 1.5ch; color: var(--fg); }
+  .recent.static td:nth-child(-n+2) { display: block; margin-right: 0; }
+  .recent.static td[data-label]::before { content: attr(data-label) " "; color: var(--dim); }
   .view { max-height: 60vh; }
   .prompt input { font-size: 16px; }
   .term > :not(.titlebar) { margin-left: 12px; margin-right: 12px; }

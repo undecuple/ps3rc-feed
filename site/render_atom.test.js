@@ -119,3 +119,9 @@ test('an unusable source time falls back to the observed time', () => {
   const xml = A.render(feedOf([repo(1)], [event(1, 'release_published', 30, { source_at: 'not a time' })]));
   assert.ok(xml.includes('<published>2026-11-10T11:30:00Z</published>'));
 });
+
+test('an event id with a lone surrogate does not stop the feed, and broken records are skipped', () => {
+  const xml = A.render(feedOf([null, repo(1)], [null, 4, event(1, 'repository_discovered', 5, { id: 'bad-\ud800-id' }), event(1, 'release_published', 10)]));
+  assert.equal(entries(xml), 2);
+  assert.ok(xml.includes('urn:ps3rc-feed:event:bad-%EF%BF%BD-id'));
+});

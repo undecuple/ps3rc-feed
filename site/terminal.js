@@ -256,8 +256,11 @@
 
   // Joins events with their repository into flat records for filtering.
   function joinData(data, now) {
-    const events = Array.isArray(data.events) ? data.events : [];
-    const repos = Array.isArray(data.repos) ? data.repos : [];
+    // Entries that are not objects (null, numbers, arrays), and events without a string id, are dropped here
+    // so one bad record cannot stop a renderer; app.js validates the same feed before it gets this far.
+    const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+    const events = (Array.isArray(data.events) ? data.events : []).filter((e) => isObj(e) && typeof e.id === 'string');
+    const repos = (Array.isArray(data.repos) ? data.repos : []).filter(isObj);
     const typesByRepo = new Map();
     for (const e of events) {
       if (!typesByRepo.has(e.repo_id)) typesByRepo.set(e.repo_id, []);
