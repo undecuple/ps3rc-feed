@@ -38,10 +38,10 @@ function row(rec) {
     '<tr>' +
     '<td>' + (href ? '<a href="' + esc(href) + '" rel="noopener noreferrer">' + name + '</a>' : name) + '</td>' +
     '<td>' + esc(T.gameLabel(rec)) + '</td>' +
-    '<td>' + kind + '</td>' +
-    '<td class="firstseen">' + esc(T.fmtTime(rec.firstSeen)) + '</td>' +
-    '<td class="firstseen">' + esc(T.fmtTime(rec.time)) + '</td>' +
-    '<td>' + esc(T.orUnknown(rec.stars)) + '</td>' +
+    '<td data-label="Kind">' + kind + '</td>' +
+    '<td class="firstseen" data-label="First seen">' + esc(T.fmtTime(rec.firstSeen)) + '</td>' +
+    '<td class="firstseen" data-label="Last commit">' + esc(T.fmtTime(rec.time)) + '</td>' +
+    '<td data-label="Stars">' + esc(T.orUnknown(rec.stars)) + '</td>' +
     '</tr>'
   );
 }
@@ -86,7 +86,7 @@ function render(feed, now) {
     '<p class="disclaimer">' + esc(DISCLAIMER) + '</p>',
     '<p class="statusline">' + esc(facts.join(' ')) + '</p>',
     '</section>',
-    '<div class="tablewrap recent">',
+    '<div class="tablewrap recent static">',
     '<p class="tablenote">' + esc(T.RECENT_NOTE) + '</p>',
     '<table>',
     '<caption>Recently discovered (one row per repository)</caption>',

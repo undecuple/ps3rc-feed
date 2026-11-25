@@ -945,3 +945,13 @@ test('a stale notice for a removed repository is labelled REMOVED, and still has
   assert.equal(mk({ removed: false }).typeLabel, 'STALE');
   assert.equal(mk({}).typeLabel, 'STALE');
 });
+
+test('joinData drops records that are not objects, and events without a string id', () => {
+  const d = T.joinData({
+    repos: [null, 5, 'x', [], { id: 'v1', repo: 'a/b', url: 'https://github.com/a/b' }],
+    events: [null, 7, [], { id: 8, type: 'commits_observed', repo_id: 'v1' }, { type: 'commits_observed', repo_id: 'v1' },
+      { id: 'v2', type: 'commits_observed', repo_id: 'v1' }],
+  }, NOW);
+  assert.deepEqual(d.repos.map((r) => r.id), ['v1']);
+  assert.deepEqual(d.events.map((e) => e.id), ['v2']);
+});

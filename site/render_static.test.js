@@ -75,7 +75,7 @@ test('order and hiding come from terminal.js', () => {
   assert.ok(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1])));
   assert.ok(!html.includes('owner3/repo3'));
   assert.ok(html.includes('1 untouched fork not listed'));
-  assert.ok(html.includes('<td>not a fork</td>'));
+  assert.ok(html.includes('<td data-label="Kind">not a fork</td>'));
 });
 
 test('an empty or broken feed still renders the notice and an empty message', () => {
@@ -137,4 +137,21 @@ test('low-confidence game names are marked unreviewed, reviewed aliases say so',
   assert.ok(html.includes('<td>Heading Name [unreviewed heading (low)]</td>'));
   assert.ok(html.includes('<td>Old Heading [unreviewed heading (low)]</td>'));
   assert.ok(html.includes('<td>Real Title [reviewed alias (strong)]</td>'));
+});
+
+test('a feed with broken records still renders, and the static table has six labelled cells a row', () => {
+  const html = R.render({ generated_at: '2026-11-10T11:30:00Z', events: [null, 3], repos: [null, 'x', repo(1)] }, NOW);
+  assert.equal(rows(html), 1);
+  const tr = html.match(/<tbody>\s*<tr>(.*?)<\/tr>/s)[1];
+  assert.equal((tr.match(/<td/g) || []).length, 6);
+  for (const label of ['Kind', 'First seen', 'Last commit', 'Stars']) assert.ok(tr.includes('data-label="' + label + '"'), label);
+  assert.ok(html.includes('class="tablewrap recent static"'));
+});
+
+test('style.css colours the static list links and stacks its six cells on a phone', () => {
+  const css = fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8');
+  assert.ok(/\.recent td a\s*\{\s*color:\s*var\(--accent\)/.test(css));
+  assert.ok(/\.recent td a:visited\s*\{\s*color:\s*var\(--accent\)/.test(css));
+  assert.ok(/color-scheme:\s*dark/.test(css));
+  assert.ok(/\.recent\.static tr\s*\{\s*display:\s*block/.test(css));
 });

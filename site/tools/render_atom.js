@@ -28,7 +28,7 @@ function entry(rec) {
   const published = Number.isFinite(rec.sourceTime) ? rec.sourceTime : rec.observedAt;
   return [
     '<entry>',
-    '<id>urn:ps3rc-feed:event:' + esc(encodeURIComponent(rec.id)) + '</id>',
+    '<id>urn:ps3rc-feed:event:' + esc(encodeURIComponent(rec.id.toWellFormed())) + '</id>',
     '<title>' + esc(name + ': ' + (rec.summary || rec.typeLabel)) + '</title>',
     '<published>' + iso(published) + '</published>',
     '<updated>' + iso(Math.max(published, rec.observedAt)) + '</updated>',
