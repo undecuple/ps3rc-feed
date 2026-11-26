@@ -438,6 +438,13 @@ class WorkflowFiles(unittest.TestCase):
                 self.assertEqual(problems, [])
                 self.assertNotRegex(text, r"\bgit\b.*\bpush\b")
 
+    def test_tests_workflow_runs_both_suites(self):
+        text = read(os.path.join(WORKFLOWS, "tests.yml"))
+        self.assertIn("python -B -m unittest discover -s tests", text)
+        self.assertIn("working-directory: site\n        run: node --test", text)
+        self.assertEqual(check_pinned(text), [])
+        self.assertEqual(check_checkout_credentials(text), [])
+
     def test_pinned_shas_are_the_ones_already_used(self):
         def pins(text):
             return set(re.findall(r"uses: ([A-Za-z0-9_./-]+@[0-9a-f]{40})", text))
