@@ -445,6 +445,17 @@ class WorkflowFiles(unittest.TestCase):
         self.assertEqual(check_pinned(text), [])
         self.assertEqual(check_checkout_credentials(text), [])
 
+    def test_deploy_is_tried_twice_and_fails_if_both_fail(self):
+        for name in ("pages.yml", "refresh.yml"):
+            text = read(os.path.join(WORKFLOWS, name))
+            first = "      - id: deployment\n        continue-on-error: true\n        uses: actions/deploy-pages@"
+            retry = "      - id: deployment_retry\n        if: steps.deployment.outcome == 'failure'\n        uses: actions/deploy-pages@"
+            self.assertIn(first, text, name)
+            self.assertIn(retry, text, name)
+            self.assertEqual(text.count("actions/deploy-pages@"), 2, name)
+            self.assertEqual(text.count("continue-on-error"), 1, name)  # the retry itself may not hide a failure
+            self.assertIn("steps.deployment_retry.outputs.page_url || steps.deployment.outputs.page_url", text, name)
+
     def test_pinned_shas_are_the_ones_already_used(self):
         def pins(text):
             return set(re.findall(r"uses: ([A-Za-z0-9_./-]+@[0-9a-f]{40})", text))
