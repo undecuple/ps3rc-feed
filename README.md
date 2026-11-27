@@ -26,7 +26,8 @@
 ---
 
 **Live page:** <https://undecuple.github.io/ps3rc-feed/>. It shows real collected data. A scheduled job refreshes it
-every hour when that job is enabled; otherwise the data is published by hand. The page shows its own collection time.
+when that job is enabled (it asks to run hourly, but GitHub starts scheduled runs late and sometimes skips them);
+otherwise the data is published by hand. The page shows its own collection time.
 
 ## What it is and is not
 
@@ -256,7 +257,9 @@ scripts, class projects and profile pages next to the few repositories about the
 repository variable `REFRESH_ENABLED` is `true`. Until the maintainer sets it, every job is skipped and the page keeps
 the data published by hand.
 
-When it runs, it starts every hour at 17 minutes past the hour, or by hand from the Actions tab. One run:
+The schedule asks for a start at 17 minutes past every hour, and a run can also be started by hand from the Actions tab.
+GitHub treats scheduled starts as best effort: the gaps between published runs have been several hours (3.9 to 13.0
+hours, measured in November 2026), so do not expect a fresh page every hour. One run:
 
 1. Collects with `--max-requests 800`.
 2. Exports on top of the state saved by the previous run.
@@ -270,8 +273,9 @@ When it runs, it starts every hour at 17 minutes past the hour, or by hand from 
 6. Adds the run to the `feed-history` branch, on a first run too. This job runs beside steps 4 and 5, and its
    failure does not stop them.
 
-A run makes at most 800 requests, and 24 runs a day make at most 19,200. Scheduled runs start an hour apart and
-never overlap (a run takes about 6 minutes), so an hour holds at most one of them, under the token's limit of 1,000 requests an hour. A run started
+A run makes at most 800 requests, and 24 runs a day (the most the schedule can ask for) make at most 19,200.
+The concurrency setting keeps runs from overlapping (a run takes about 6 minutes), and the schedule asks for at most one
+start an hour, so a normal hour stays under the token's limit of 1,000 requests an hour. A run started
 by hand adds up to 800 more, and the collector stops when it reaches a rate limit.
 
 Code search on the Actions token: its secondary limit is observed, not documented. GitHub publishes no figure for
